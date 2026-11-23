@@ -44,7 +44,7 @@
 - 言語/フレームワーク: Rust 1.99（edition 2024）、Cargo ワークスペース
 - UI: `gpui-kit`（gpui + gpui-component）を git rev 固定。gpui は `gpui-pre =0.3.12`（gpui-kit 経由。D-001）
 - DB: SQLite（端末・サーバー）
-- 主要ライブラリ: jxl-oxide（JXL）、image（PNG/JPEG）、ksni（Linux トレイ。D-002）、async-channel、tracing
+- 主要ライブラリ: jxl-oxide（JXL）、image（PNG/JPEG）、ksni（Linux トレイ。D-002）、zbus（KWin 制御）、async-channel、tracing
 
 ### 3. ディレクトリ構造 / Critical Paths（最重要）
 （「〇〇をしたいときはここを見る」の対応表。ファイルが増えるたびに更新）
@@ -72,7 +72,7 @@
 
 ```bash
 cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --all   # コミット前に必須
-cargo run -p fusen-desktop --example p0_wall_overlay    # Phase 0 検証（他に p0_note_surface, p0_tray）
+cargo run -p fusen-desktop --example p0_kwin_window     # Phase 0 検証（他に p0_note_surface, p0_wall_overlay, p0_tray）
 ```
 
 ### 6. 既知の制約・注意点
@@ -81,6 +81,7 @@ cargo run -p fusen-desktop --example p0_wall_overlay    # Phase 0 検証（他�
 - gpui では layer-shell サーフェスの margin（位置）と層を作成後に変えられない（サイズは `Window::resize` で可）。詳細と回避策は `docs/decisions.md`
 - gpui の `RenderImage` は BGRA。RGBA の画像は R と B を入れ替えて渡す
 - Linux のトレイは `tray-icon` ではなく `ksni`（GTK ループ不要のため）
+- Wayland で普通のウィンドウを常に背面/最前面・タスクバー非表示・位置指定するには KWin スクリプトを D-Bus で実行する（`examples/common/kwin.rs`）。呼び出しは直列化すること
 
 ### 7. 変更履歴（任意）
 （大きな方針転換があった場合のみ、日付と概要を1行で）
