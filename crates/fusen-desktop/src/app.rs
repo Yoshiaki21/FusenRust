@@ -40,6 +40,8 @@ pub struct FusenApp {
     /// ウィンドウを開いたが、まだウィンドウマネージャーから最初の位置の通知が来ていない付箋。
     /// 最初の通知でウィンドウが表示されたと分かるので、そこで保存済みの配置・層を適用する。
     awaiting_map: HashSet<Uuid>,
+    /// この端末で新しく作り、まだ配置を保存していない付箋（最前面で表示する。docs/decisions.md D-007）
+    created_here: HashSet<Uuid>,
 }
 
 impl Global for FusenApp {}
@@ -54,6 +56,7 @@ pub fn init(cx: &mut App, store: Arc<Store>, paths: AppPaths, settings: Settings
         manager: None,
         show_all_active: false,
         awaiting_map: HashSet::new(),
+        created_here: HashSet::new(),
     });
     imp::install_window_control(profile(cx).as_deref());
 
@@ -176,6 +179,8 @@ pub fn open_note(cx: &mut App, note_id: Uuid, draft: Option<String>) {
 pub fn new_note(cx: &mut App) {
     let store = store(cx);
     if let Some(r) = log_err(store.create_note("", fusen_core::color::DEFAULT)) {
+        // 新しく作った付箋は他のウィンドウに埋もれないよう最前面で表示する
+        cx.global_mut::<FusenApp>().created_here.insert(r.note_id);
         open_note(cx, r.note_id, Some(String::new()));
         notes_changed(cx, r.note_id);
     }
@@ -400,8 +405,10 @@ fn on_window_geometry(
     let saved = log_err(store.placement(note_id)).flatten();
 
     // 最初の通知 = ウィンドウが表示された。保存済みの配置と層を適用する
+    let created_here = cx.global_mut::<FusenApp>().created_here.remove(&note_id);
     if cx.global_mut::<FusenApp>().awaiting_map.remove(&note_id) {
-        let on_top = saved.as_ref().is_some_and(|p| p.always_on_top);
+        // 保存済みの配置があればその設定、なければ「この端末で新しく作った付箋」だけ最前面
+        let on_top = saved.as_ref().map_or(created_here, |p| p.always_on_top);
         view.update(cx, |v, _| v.set_always_on_top_state(on_top));
         let caption = platform::note_caption(profile(cx).as_deref(), note_id);
         let show_all = cx.global::<FusenApp>().show_all_active;
@@ -462,7 +469,7 @@ fn on_window_geometry(
                     y: g.y,
                     width: g.width,
                     height: g.height,
-                    always_on_top: false,
+                    always_on_top: on_top,
                     visible: true,
                 }));
                 return;
@@ -478,7 +485,7 @@ fn on_window_geometry(
         y,
         width,
         height,
-        always_on_top: saved.as_ref().is_some_and(|p| p.always_on_top),
+        always_on_top: saved.as_ref().map_or(created_here, |p| p.always_on_top),
         visible: true,
     };
     if saved.as_ref() != Some(&p) {
