@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fusen-proto", "crates/fusen-core", "crates/fusen-desktop"]
+members = ["crates/fusen-proto", "crates/fusen-core", "crates/fusen-server", "crates/fusen-desktop"]
 
 [workspace.package]
 edition = "2024"
