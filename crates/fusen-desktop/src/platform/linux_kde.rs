@@ -309,11 +309,14 @@ fn js_str(s: &str) -> String {
 /// 付箋ウィンドウの層と表示を設定する。`geometry` があればその位置・サイズに置く。
 ///
 /// 全仮想デスクトップに表示し、タスクバー・ページャー・Alt+Tab から外す。
+/// `reveal` が true なら、表示直後に透明にしておいたウィンドウを見えるようにする
+/// （位置が決まるまで動く様子を見せないため。docs/decisions.md D-008）。
 pub fn apply_note_window(
     profile: Option<&str>,
     caption: &str,
     on_top: bool,
     geometry: Option<Geometry>,
+    reveal: bool,
 ) {
     let geometry_js = geometry
         .map(|g| {
@@ -334,11 +337,26 @@ for (const w of workspace.windowList()) {{
     w.skipSwitcher = true;
     w.onAllDesktops = true;
     {geometry_js}
+    {reveal_js}
 }}
 "#,
         caption = js_str(caption),
         below = !on_top,
         above = on_top,
+        reveal_js = if reveal { "w.opacity = 1;" } else { "" },
+    );
+    submit_oneshot(profile, source);
+}
+
+/// 透明にしておいた付箋ウィンドウを見えるようにする（位置の通知が来なかったときの保険）
+pub fn reveal_note_window(profile: Option<&str>, caption: &str) {
+    let source = format!(
+        r#"
+for (const w of workspace.windowList()) {{
+    if (w.caption === {caption}) w.opacity = 1;
+}}
+"#,
+        caption = js_str(caption)
     );
     submit_oneshot(profile, source);
 }
@@ -407,6 +425,9 @@ function guard(w) {{
     if (w.__fusenGuard || w.caption.indexOf(PREFIX) !== 0) return;
     w.__fusenGuard = true;
     w.__fusenLast = null;
+    // 新しく開いた付箋は、アプリが位置を決めて見えるようにするまで透明にしておく
+    // （表示された後に動かすので、動く様子を見せないため）
+    if (w.__fusenNew) w.opacity = 0;
     // ドラッグ中の位置を覚えておく（タイル化を取り消すと KWin はドラッグ前の位置に戻すため）
     w.interactiveMoveResizeStarted.connect(function () {{ w.__fusenLast = null; }});
     w.interactiveMoveResizeStepped.connect(function (g) {{
@@ -428,13 +449,15 @@ function guard(w) {{
     }});
     report(w);
 }}
-function watch(w) {{
+function watch(w, isNew) {{
+    w.__fusenNew = isNew;
     guard(w);
     // タイトルは表示後に設定されることがあるので、変わったときにも確認する
     w.captionChanged.connect(function () {{ guard(w); }});
 }}
-for (const w of workspace.windowList()) watch(w);
-workspace.windowAdded.connect(watch);
+// 読み込む前から開いている付箋は透明にしない
+for (const w of workspace.windowList()) watch(w, false);
+workspace.windowAdded.connect(function (w) {{ watch(w, true); }});
 "#,
         prefix = js_str(&caption_prefix(profile)),
         bus = js_str(&bus_name(profile)),

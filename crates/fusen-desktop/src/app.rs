@@ -170,6 +170,15 @@ pub fn open_note(cx: &mut App, note_id: Uuid, draft: Option<String>) {
             let app = cx.global_mut::<FusenApp>();
             app.notes.insert(note_id, OpenNote { window, view });
             app.awaiting_map.insert(note_id);
+            // 保険: KWin から位置の通知が来ず、透明のまま残ってしまわないよう、少し後に必ず見えるようにする
+            let profile = profile(cx);
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                imp::reveal_note_window(profile.as_deref(), &caption);
+            })
+            .detach();
         }
         Err(e) => tracing::error!("付箋のウィンドウを開けません: {e:#}"),
     }
@@ -229,7 +238,7 @@ pub fn activate_note(cx: &mut App, note_id: Uuid) {
 /// 付箋の層（壁 / 最前面）を KWin に反映する
 pub fn apply_layer(cx: &App, note_id: Uuid, on_top: bool) {
     let caption = platform::note_caption(profile(cx).as_deref(), note_id);
-    imp::apply_note_window(profile(cx).as_deref(), &caption, on_top, None);
+    imp::apply_note_window(profile(cx).as_deref(), &caption, on_top, None, true);
 }
 
 /// 付箋の内容が変わった: 開いているウィンドウと管理画面を更新する。
@@ -429,11 +438,13 @@ fn on_window_geometry(
                 height,
             })
         });
+        // 動かさないならすぐ見せる。動かすなら、置き直した後（0.4 秒後）に見せる
         imp::apply_note_window(
             profile(cx).as_deref(),
             &caption,
             on_top || show_all,
             geometry,
+            geometry.is_none(),
         );
         if let Some(g) = geometry {
             // 表示直後は KWin の初期配置が後から上書きすることがあるので、少し待ってもう一度置く
@@ -449,6 +460,7 @@ fn on_window_geometry(
                         &caption,
                         on_top || show_all,
                         Some(g),
+                        true,
                     );
                 }
             })
