@@ -61,12 +61,59 @@ for (const w of workspace.windowList()) {{
 }}
 "#
     );
-    run_script(&script)
+    run_script(&script, "fusen-window-control", false)
 }
 
-/// 一時ファイルに書いた KWin スクリプトを読み込んで実行し、すぐに読み込みを解除する。
-fn run_script(source: &str) -> anyhow::Result<()> {
-    const PLUGIN: &str = "fusen-window-control";
+/// 付箋ウィンドウの最大化・タイル化（画面の端へドラッグしたときの全画面・半分表示）を止める
+/// 常駐スクリプトを KWin に読み込む。アプリの終了時に [`uninstall_guard`] で解除する。
+///
+/// Wayland のウィンドウにはアプリ側から「最大化させない」と伝える手段がなく、
+/// KWin のウィンドウルール（maximizehoriz/maximizevert）はユーザー全体の設定を書き換えてしまう。
+/// そこでアプリが動いている間だけ、付箋ウィンドウがタイル化・最大化されたら即座に元へ戻す。
+/// （画面端への移動中に KWin のプレビュー枠は出るが、離すと元の大きさのまま残る）
+pub fn install_guard() -> anyhow::Result<()> {
+    let script = r#"
+function guard(w) {
+    if (w.__fusenGuard || w.caption.indexOf("fusen-note:") !== 0) return;
+    w.__fusenGuard = true;
+    w.tileChanged.connect(function () { if (w.tile) w.tile = null; });
+    w.maximizedChanged.connect(function () {
+        if (w.maximizeMode !== 0) w.setMaximize(false, false);
+    });
+}
+function watch(w) {
+    guard(w);
+    // タイトルは表示後に設定されることがあるので、変わったときにも確認する
+    w.captionChanged.connect(function () { guard(w); });
+}
+for (const w of workspace.windowList()) watch(w);
+workspace.windowAdded.connect(watch);
+"#;
+    run_script(script, GUARD_PLUGIN, true)
+}
+
+/// [`install_guard`] で読み込んだ常駐スクリプトを解除する。
+pub fn uninstall_guard() -> anyhow::Result<()> {
+    let conn = zbus::blocking::Connection::session().context("セッションバスに接続できません")?;
+    unload(&conn, GUARD_PLUGIN);
+    Ok(())
+}
+
+const GUARD_PLUGIN: &str = "fusen-guard";
+
+fn unload(conn: &zbus::blocking::Connection, plugin: &str) {
+    let _ = conn.call_method(
+        Some("org.kde.KWin"),
+        "/Scripting",
+        Some("org.kde.kwin.Scripting"),
+        "unloadScript",
+        &(plugin,),
+    );
+}
+
+/// 一時ファイルに書いた KWin スクリプトを読み込んで実行する。
+/// `keep` が false なら実行後すぐに読み込みを解除する（1 回きりの操作）。
+fn run_script(source: &str, plugin: &str, keep: bool) -> anyhow::Result<()> {
     // 同じプラグイン名を使い回すので、複数の付箋から同時に呼ばれても 1 つずつ実行する
     static LOCK: Mutex<()> = Mutex::new(());
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -80,46 +127,41 @@ fn run_script(source: &str) -> anyhow::Result<()> {
     let conn = zbus::blocking::Connection::session().context("セッションバスに接続できません")?;
 
     // 同じ名前のスクリプトが残っていると loadScript が失敗するので、先に解除しておく
-    let _ = conn.call_method(
-        Some("org.kde.KWin"),
-        "/Scripting",
-        Some("org.kde.kwin.Scripting"),
-        "unloadScript",
-        &(PLUGIN,),
-    );
+    // （前回のアプリが異常終了して常駐スクリプトが残っている場合もここで入れ替わる）
+    unload(&conn, plugin);
 
     let path_str = path.to_string_lossy().to_string();
-    let reply = conn
-        .call_method(
+    let result = (|| {
+        let reply = conn
+            .call_method(
+                Some("org.kde.KWin"),
+                "/Scripting",
+                Some("org.kde.kwin.Scripting"),
+                "loadScript",
+                &(path_str.as_str(), plugin),
+            )
+            .context("KWin の loadScript に失敗")?;
+        let id: i32 = reply
+            .body()
+            .deserialize()
+            .context("loadScript の応答が不正")?;
+        anyhow::ensure!(id >= 0, "KWin がスクリプトを読み込めませんでした (id={id})");
+
+        conn.call_method(
             Some("org.kde.KWin"),
-            "/Scripting",
-            Some("org.kde.kwin.Scripting"),
-            "loadScript",
-            &(path_str.as_str(), PLUGIN),
+            format!("/Scripting/Script{id}").as_str(),
+            Some("org.kde.kwin.Script"),
+            "run",
+            &(),
         )
-        .context("KWin の loadScript に失敗")?;
-    let id: i32 = reply
-        .body()
-        .deserialize()
-        .context("loadScript の応答が不正")?;
-    anyhow::ensure!(id >= 0, "KWin がスクリプトを読み込めませんでした (id={id})");
+        .context("KWin スクリプトの実行に失敗")?;
+        Ok(())
+    })();
 
-    conn.call_method(
-        Some("org.kde.KWin"),
-        format!("/Scripting/Script{id}").as_str(),
-        Some("org.kde.kwin.Script"),
-        "run",
-        &(),
-    )
-    .context("KWin スクリプトの実行に失敗")?;
-
-    let _ = conn.call_method(
-        Some("org.kde.KWin"),
-        "/Scripting",
-        Some("org.kde.kwin.Scripting"),
-        "unloadScript",
-        &(PLUGIN,),
-    );
+    if !keep {
+        unload(&conn, plugin);
+    }
+    // KWin は run の時点でスクリプトを読み終えているので、ファイルは消してよい
     let _ = std::fs::remove_file(&path);
-    Ok(())
+    result
 }

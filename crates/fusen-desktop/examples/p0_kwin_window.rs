@@ -8,6 +8,7 @@
 //! 移動とサイズ変更は OS（KWin）の機能を使う（`start_window_move` / `start_window_resize`）。
 //! 本文の表示・編集は方式 A と同じ（common の NoteBody）。
 //! 画像などのファイルを付箋にドロップすると、付箋の一番下に添付として表示する。
+//! 画面端へのドラッグによる最大化・タイル化は、常駐の KWin スクリプトで取り消す。
 //!
 //! 使い方:
 //!   cargo run -p fusen-desktop --example p0_kwin_window
@@ -191,6 +192,10 @@ mod linux {
             .with_assets(gpui_kit::assets::Assets)
             .run(move |cx| {
                 gpui_kit::init(cx);
+                // 画面端へのドラッグで付箋が全画面・半分表示にならないようにする
+                if let Err(e) = kwin::install_guard() {
+                    tracing::error!("最大化防止スクリプトを読み込めません: {e:#}");
+                }
                 open_note(
                     1,
                     common::SAMPLE_MARKDOWN,
@@ -208,6 +213,9 @@ mod linux {
                 // 全部の付箋を閉じたら終了する
                 cx.on_window_closed(|cx, _| {
                     if cx.windows().is_empty() {
+                        if let Err(e) = kwin::uninstall_guard() {
+                            tracing::warn!("最大化防止スクリプトを解除できません: {e:#}");
+                        }
                         cx.quit();
                     }
                 })
