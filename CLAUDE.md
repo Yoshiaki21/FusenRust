@@ -44,6 +44,7 @@
 - 言語/フレームワーク: Rust 1.99（edition 2024）、Cargo ワークスペース
 - UI: `gpui-kit`（gpui + gpui-component）を git rev 固定。gpui は `gpui-pre =0.3.12`（gpui-kit 経由。D-001）
 - DB: SQLite（端末・サーバー）
+- core: rusqlite 0.37（bundled）、uuid（v7）、chrono、sha2、thiserror。テストは tempfile・futures-lite
 - 主要ライブラリ: jxl-oxide（JXL）、image（PNG/JPEG）、ksni（Linux トレイ。D-002）、zbus（KWin 制御）、async-channel、tracing
 
 ### 3. ディレクトリ構造 / Critical Paths（最重要）
@@ -52,8 +53,15 @@
 | やりたいこと | 場所 |
 |---|---|
 | gpui-kit の rev を変える | `Cargo.toml`（workspace.dependencies） |
+| API の型（版・添付・差分・WebSocket） | `crates/fusen-proto/src/lib.rs` |
+| 端末側 DB のスキーマ・マイグレーション | `crates/fusen-core/src/db.rs`（追加は MIGRATIONS の末尾に足すだけ） |
+| 付箋・版・ごみ箱・revert・下書き・配置・同期の記録 | `crates/fusen-core/src/store.rs`（`Store`） |
+| 添付の実体（SHA-256・重複排除・上限） | `crates/fusen-core/src/blob.rs` |
+| `attachment://` 参照の抽出・作成 | `crates/fusen-core/src/markdown.rs` |
+| 同期エンジン・通信のトレイト | `crates/fusen-core/src/sync.rs`（`Transport`） |
+| core のテスト（仮サーバーでの同期を含む） | `crates/fusen-core/tests/` |
 | デスクトップアプリ本体 | `crates/fusen-desktop/src/` |
-| OS 依存コード（layer-shell / Win32） | `crates/fusen-desktop/src/platform/` |
+| OS 依存コード（KWin スクリプト / Win32） | `crates/fusen-desktop/src/platform/` |
 | Phase 0 の検証プログラム | `crates/fusen-desktop/examples/p0_*.rs`（共通部品は `examples/common/mod.rs`） |
 | 細かい判断の記録・Phase 0 の結果 | `docs/decisions.md` |
 | gpui のソース（API 確認用） | `~/.cargo/registry/src/*/gpui-pre-0.3.12/`（examples/layer_shell.rs など） |
@@ -65,6 +73,8 @@
 - gpui の API は推測で書かず、上記ソースを確認してから書く（1.0 前で破壊的変更が多いため）
 - gpui は `gpui_kit::*` 経由で使い、直接依存に書かない（バージョンの二重指定を避けるため）
 - コメントは日本語。OS 依存は `cfg(target_os)` で分けて `platform/` に置く
+- fusen-proto / fusen-core に gpui・OS 固有の依存を入れない（Android 版で UniFFI から使うため）
+- 版は追記のみ。UPDATE は仮番号→確定番号の置き換え（`store.rs` の `confirm`）だけ。未同期の版は負の仮番号（D-004）
 - エラーは anyhow（アプリ）/ thiserror（ライブラリ）。`unwrap()` はテスト以外禁止。ログは tracing
 
 ### 5. よく使うコマンド
@@ -78,7 +88,7 @@ cargo run -p fusen-desktop --example p0_kwin_window     # Phase 0 検証（他�
 ### 6. 既知の制約・注意点
 （ハマりやすい点、あえてやっていないことなど）
 
-- gpui では layer-shell サーフェスの margin（位置）と層を作成後に変えられない（サイズは `Window::resize` で可）。詳細と回避策は `docs/decisions.md`
+- 付箋は layer-shell ではなく普通のウィンドウ＋KWin スクリプト（D-003）。gpui では layer-shell の位置・層を後から変えられないため
 - gpui の `RenderImage` は BGRA。RGBA の画像は R と B を入れ替えて渡す
 - Linux のトレイは `tray-icon` ではなく `ksni`（GTK ループ不要のため）
 - Wayland で普通のウィンドウを常に背面/最前面・タスクバー非表示・位置指定するには KWin スクリプトを D-Bus で実行する（`examples/common/kwin.rs`）。呼び出しは直列化すること
@@ -86,7 +96,7 @@ cargo run -p fusen-desktop --example p0_kwin_window     # Phase 0 検証（他�
 ### 7. 変更履歴（任意）
 （大きな方針転換があった場合のみ、日付と概要を1行で）
 
--
+- 2026-11-23: 付箋ウィンドウを layer-shell から普通のウィンドウ＋KWin スクリプトに変更（D-003）
 
 ---
 
