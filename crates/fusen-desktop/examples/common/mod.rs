@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
 };
 
+pub mod kwin;
+
 use anyhow::Context as _;
 use gpui_kit::component::{
     ActiveTheme as _,
@@ -119,10 +121,60 @@ impl NoteBody {
         cx.notify();
     }
 
-    fn on_drop_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+    /// ファイルがドロップされたら添付として扱う。
+    ///
+    /// - 整形表示中: 本文の末尾に参照を追加する（＝付箋の一番下に表示される）
+    /// - 編集中: カーソル位置に参照を挿入する（仕様 5.2）
+    /// - PNG / JPEG / JXL は画像として、それ以外はリンクとして参照する
+    fn on_drop_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for p in paths.paths() {
             tracing::info!("ドロップ: {p:?}");
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
+            // 本実装では UUIDv7 の attachment_id を使う。検証では連番で代用する
+            let key = format!("drop{}", self.dropped.len() + 1);
             self.dropped.push(p.clone());
+
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "jxl");
+            let reference = if is_image {
+                match load_render_image(p) {
+                    Ok(img) => {
+                        Arc::make_mut(&mut self.images).insert(key.clone(), img);
+                        format!("![{name}](attachment://{key})")
+                    }
+                    Err(e) => {
+                        tracing::warn!("画像を読めません: {e:#}");
+                        format!("[{name}](attachment://{key})")
+                    }
+                }
+            } else {
+                format!("[📎 {name}](attachment://{key})")
+            };
+
+            if self.editing {
+                self.editor.update(cx, |state, cx| {
+                    state.insert(format!("{reference}\n"), window, cx);
+                });
+            } else {
+                if !self.text.ends_with('\n') {
+                    self.text.push('\n');
+                }
+                self.text.push('\n');
+                self.text.push_str(&reference);
+                self.text.push('\n');
+            }
         }
         cx.notify();
     }
@@ -176,7 +228,6 @@ impl Render for NoteBody {
                 .into_any_element()
         };
 
-        let dropped = self.dropped.clone();
         div()
             .id("note-body")
             .flex()
@@ -188,16 +239,10 @@ impl Render for NoteBody {
             .text_color(rgb(NOTE_TEXT))
             // ファイルのドラッグ＆ドロップ
             .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.15)))
-            .on_drop(
-                cx.listener(|this, paths: &ExternalPaths, _, cx| this.on_drop_paths(paths, cx)),
-            )
-            .child(div().flex_1().min_h_0().child(body))
-            .children(dropped.into_iter().map(|p| {
-                div()
-                    .text_xs()
-                    .child(format!("📎 {}", p.display()))
-                    .into_any_element()
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.on_drop_paths(paths, window, cx)
             }))
+            .child(div().flex_1().min_h_0().child(body))
     }
 }
 

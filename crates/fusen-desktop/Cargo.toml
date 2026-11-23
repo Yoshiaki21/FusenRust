@@ -18,3 +18,5 @@ async-channel = "2.5.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 # KDE のトレイ（StatusNotifierItem）。D-Bus だけで動き、GTK のイベントループを必要としないため採用
 ksni = { version = "0.3.7", features = ["blocking"] }
+# KWin スクリプトを D-Bus で読み込み、普通のウィンドウの「常に背面/最前面」等を切り替えるため
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
