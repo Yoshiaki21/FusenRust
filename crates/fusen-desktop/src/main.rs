@@ -17,19 +17,16 @@ mod note_window;
 mod palette;
 mod platform;
 mod settings;
+mod sync;
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, Global, KeyBinding};
+use gpui_kit::{App, KeyBinding};
 
 use crate::platform::{AppEvent, Command, imp};
 use crate::settings::{AppPaths, Settings};
-
-/// OS 側の資源をアプリの終了まで保持する
-struct PlatformGlobal(#[allow(dead_code)] imp::PlatformHandle);
-impl Global for PlatformGlobal {}
 
 fn main() {
     init_tracing();
@@ -67,6 +64,8 @@ fn parse_profile(args: Vec<String>) -> (Option<String>, Vec<String>) {
 }
 
 fn run() -> anyhow::Result<()> {
+    // TLS（HTTPS / WSS）の暗号の実装を決めておく（reqwest と WebSocket で同じものを使う）
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (profile, args) = parse_profile(std::env::args().skip(1).collect());
     let commands = Command::from_args(&args);
 
@@ -101,7 +100,7 @@ fn run() -> anyhow::Result<()> {
                 note_window::PasteAttachment,
                 Some("FusenNote"),
             )]);
-            cx.set_global(PlatformGlobal(handle));
+            cx.set_global(app::PlatformGlobal(handle));
 
             app::init(cx, store, paths, settings);
             for c in commands {

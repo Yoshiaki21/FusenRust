@@ -16,6 +16,11 @@ use crate::manager::{ManagerTab, ManagerWindow};
 use crate::note_window::NoteWindow;
 use crate::platform::{self, AppEvent, Command, imp};
 use crate::settings::{AppPaths, DEFAULT_NOTE_HEIGHT, DEFAULT_NOTE_WIDTH, Settings};
+use crate::sync::{FetchResult, ServerConfig, SyncEvent, SyncService, SyncState, SyncStatus};
+
+/// OS 側の資源（D-Bus の名前・トレイ）をアプリの終了まで保持する
+pub struct PlatformGlobal(pub imp::PlatformHandle);
+impl Global for PlatformGlobal {}
 
 /// gpui-component の Root が、クライアント側で描くウィンドウの周りに付ける影の幅（Linux は 20px）。
 /// ウィンドウマネージャーが扱う位置・サイズ（配置として保存する値）は影の内側なので、
@@ -42,16 +47,38 @@ pub struct FusenApp {
     awaiting_map: HashSet<Uuid>,
     /// この端末で新しく作り、まだ配置を保存していない付箋（最前面で表示する。docs/decisions.md D-007）
     created_here: HashSet<Uuid>,
+    sync: SyncService,
+    sync_status: SyncStatus,
 }
 
 impl Global for FusenApp {}
 
 /// アプリの状態を作り、保存されている付箋を開く
 pub fn init(cx: &mut App, store: Arc<Store>, paths: AppPaths, settings: Settings) {
+    // 同期サービス（別スレッド）。状態や他の端末からの変更はチャンネルで届く
+    let (events_tx, events_rx) = async_channel::unbounded::<SyncEvent>();
+    let sync = SyncService::start(
+        store.clone(),
+        server_config(&settings),
+        settings.max_attachment_bytes(),
+        events_tx,
+    );
+    cx.spawn(async move |cx| {
+        while let Ok(ev) = events_rx.recv().await {
+            cx.update(|cx| on_sync_event(cx, ev));
+        }
+    })
+    .detach();
+
     cx.set_global(FusenApp {
         store,
         paths,
         settings,
+        sync,
+        sync_status: SyncStatus {
+            state: SyncState::Connecting,
+            pending: 0,
+        },
         notes: HashMap::new(),
         manager: None,
         show_all_active: false,
@@ -63,6 +90,7 @@ pub fn init(cx: &mut App, store: Arc<Store>, paths: AppPaths, settings: Settings
     // 終了時: 編集中の付箋を保存し、KWin の常駐スクリプトを解除する
     cx.on_app_quit(|cx| {
         save_all_editing(cx);
+        cx.global::<FusenApp>().sync.shutdown();
         imp::uninstall_window_control(profile(cx).as_deref());
         async {}
     })
@@ -81,6 +109,99 @@ pub fn store(cx: &App) -> Arc<Store> {
 
 pub fn settings(cx: &App) -> &Settings {
     &cx.global::<FusenApp>().settings
+}
+
+/// 設定から同期の接続先を作る（URL かトークンが空なら同期しない）
+pub fn server_config(s: &Settings) -> Option<ServerConfig> {
+    let url = s.server_url.trim();
+    let token = s.token.trim();
+    (!url.is_empty() && !token.is_empty()).then(|| ServerConfig {
+        url: url.to_string(),
+        token: token.to_string(),
+    })
+}
+
+/// 設定を変えた: 同期の接続先を更新する
+pub fn apply_settings(cx: &mut App) {
+    let app = cx.global::<FusenApp>();
+    app.sync.reconfigure(server_config(&app.settings));
+}
+
+pub fn sync_status(cx: &App) -> SyncStatus {
+    cx.global::<FusenApp>().sync_status.clone()
+}
+
+/// 添付の実体をサーバーから取得する（この端末にまだないとき）
+pub fn fetch_blob(cx: &App, attachment_id: Uuid) -> async_channel::Receiver<FetchResult> {
+    cx.global::<FusenApp>().sync.fetch(attachment_id)
+}
+
+/// 同期サービスからの通知
+fn on_sync_event(cx: &mut App, ev: SyncEvent) {
+    match ev {
+        SyncEvent::Status(status) => {
+            let label = status.label();
+            cx.global_mut::<FusenApp>().sync_status = status;
+            if let Some(p) = cx.try_global::<PlatformGlobal>() {
+                imp::set_tray_status(&p.0, &label);
+            }
+            refresh_manager(cx);
+        }
+        SyncEvent::RemoteChanges { changed, new } => on_remote_changes(cx, changed, new),
+        // 取得した画像を描き直す
+        SyncEvent::BlobsFetched => cx.refresh_windows(),
+    }
+}
+
+/// 他の端末からの変更を画面に反映する（docs/spec.md 3.2, 4.4）
+fn on_remote_changes(cx: &mut App, changed: Vec<Uuid>, new: Vec<Uuid>) {
+    let store = store(cx);
+    let mut ids = changed;
+    for id in &new {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    for id in ids {
+        let Some(note) = log_err(store.note(id)) else {
+            continue;
+        };
+        let is_open = cx.global::<FusenApp>().notes.contains_key(&id);
+        if note.deleted {
+            // 他の端末でごみ箱に入れられた
+            close_note_window(cx, id);
+            continue;
+        }
+        if is_open {
+            // 編集中なら本文は上書きせず「他の端末で更新されました」を出す（note_window.rs）
+            notes_changed(cx, id);
+            continue;
+        }
+        let restored = log_err(store.revision(id, note.rev))
+            .is_some_and(|r| r.kind == fusen_core::RevisionKind::Restore);
+        if new.contains(&id) {
+            // 他の端末で新しく作られた付箋: 左上付近に既定サイズで、壁モードで置く
+            log_err(store.ensure_placement(id, DEFAULT_NOTE_WIDTH, DEFAULT_NOTE_HEIGHT));
+            open_note(cx, id, None);
+        } else if restored
+            && log_err(store.placement(id))
+                .flatten()
+                .is_none_or(|p| p.visible)
+        {
+            // 他の端末でごみ箱から戻された
+            open_note(cx, id, None);
+        }
+    }
+    refresh_manager(cx);
+}
+
+/// 管理画面を読み直す（後で実行する）
+pub fn refresh_manager(cx: &mut App) {
+    cx.defer(|cx| {
+        if let Some((_, manager)) = cx.global::<FusenApp>().manager.clone() {
+            manager.update(cx, |m, cx| m.refresh(cx));
+        }
+    });
 }
 
 /// エラーをログに出す（UI に出せない場所で使う）
@@ -245,6 +366,8 @@ pub fn apply_layer(cx: &App, note_id: Uuid, on_top: bool) {
 ///
 /// ビューの更新中（付箋ウィンドウ自身の操作の中など）から呼ばれても二重に借用しないよう、後で実行する。
 pub fn notes_changed(cx: &mut App, note_id: Uuid) {
+    // 付箋が変わったらすぐ同期する（未送信の版がなければ差分の取り込みだけ）
+    cx.global::<FusenApp>().sync.kick();
     cx.defer(move |cx| {
         if let Some(open) = cx.global::<FusenApp>().notes.get(&note_id) {
             let view = open.view.clone();

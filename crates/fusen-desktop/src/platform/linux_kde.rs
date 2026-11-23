@@ -101,6 +101,7 @@ pub fn start(
     let tray = match (FusenTray {
         tx: tx.clone(),
         profile: profile.map(str::to_string),
+        status: String::new(),
     })
     .spawn()
     {
@@ -117,6 +118,14 @@ pub fn start(
         _conn: conn,
         _tray: tray,
     }))
+}
+
+/// トレイのツールチップに同期の状態を出す
+pub fn set_tray_status(handle: &PlatformHandle, status: &str) {
+    if let Some(tray) = &handle._tray {
+        let status = status.to_string();
+        tray.update(move |t| t.status = status);
+    }
 }
 
 /// 動いている 1 つ目のプロセスに命令を渡す
@@ -201,6 +210,8 @@ fn watch_signals(tx: Sender<AppEvent>) {
 pub struct FusenTray {
     tx: Sender<AppEvent>,
     profile: Option<String>,
+    /// 同期の状態（ツールチップに出す）
+    status: String,
 }
 
 impl FusenTray {
@@ -220,6 +231,13 @@ impl ksni::Tray for FusenTray {
         match &self.profile {
             Some(p) => format!("FusenRust ({p})"),
             None => "FusenRust".into(),
+        }
+    }
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: self.title(),
+            description: self.status.clone(),
+            ..Default::default()
         }
     }
     fn icon_name(&self) -> String {

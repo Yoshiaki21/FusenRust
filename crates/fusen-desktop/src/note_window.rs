@@ -37,8 +37,9 @@ const DRAFT_INTERVAL: Duration = Duration::from_secs(3);
 
 /// 編集の状態
 struct EditSession {
-    /// 編集を始めたときの版（競合の検出用）
-    base_rev: i64,
+    /// 編集を始めたときの版の操作 ID（競合の検出用）。
+    /// 版の番号は同期で仮番号から確定番号に変わるので、番号ではなく操作 ID で覚える
+    base_op: Uuid,
     /// 編集中に増減した添付（編集終了時の版にまとめる）
     attachments: Vec<Uuid>,
     /// 最後に保存した下書き
@@ -179,7 +180,7 @@ impl NoteWindow {
         }
         let text = text.unwrap_or_else(|| n.content.clone());
         self.editing = Some(EditSession {
-            base_rev: n.rev,
+            base_op: n.op_id,
             attachments: n.attachments.clone(),
             last_draft: text.clone(),
         });
@@ -197,12 +198,12 @@ impl NoteWindow {
         };
         let content = self.editor.read(cx).value().to_string();
         let store = self.store(cx);
-        match store.save_edit(
-            self.note_id,
-            &content,
-            Some(session.attachments),
-            Some(session.base_rev),
-        ) {
+        // 編集を始めた版の、今の番号（同期で確定番号に変わっていることがある）
+        let base_rev = store
+            .rev_of_op(self.note_id, session.base_op)
+            .ok()
+            .flatten();
+        match store.save_edit(self.note_id, &content, Some(session.attachments), base_rev) {
             Ok(Some(r)) => tracing::info!("付箋 {} を保存しました（版 {}）", self.note_id, r.rev),
             Ok(None) => {}
             Err(e) => tracing::error!("付箋を保存できません: {e}"),
@@ -464,45 +465,75 @@ impl NoteWindow {
         }
     }
 
-    fn open_attachment(&self, id: Uuid, window: &mut Window, cx: &mut App) {
+    /// 添付の実体のパスを得てから `f` を呼ぶ。この端末にまだなければサーバーから取得する
+    /// （画像以外の添付は、開く・保存するときに取得する方針。docs/spec.md 5.2）
+    fn with_blob(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         match app::store(cx).blob_path(id) {
-            Ok(Some(path)) => cx.open_with_system(&path),
-            Ok(None) => self.notify_error(
-                "添付の実体がこの端末にありません（同期で取得します）".into(),
-                window,
-                cx,
-            ),
+            Ok(Some(path)) => f(self, path, window, cx),
+            Ok(None) => {
+                window
+                    .push_notification(Notification::info("添付をサーバーから取得しています…"), cx);
+                let rx = app::fetch_blob(cx, id);
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = rx
+                        .recv()
+                        .await
+                        .unwrap_or_else(|_| Err("取得を中断しました".into()));
+                    let _ = this.update_in(cx, |this, window, cx| match result {
+                        Ok(path) => f(this, path, window, cx),
+                        Err(e) => {
+                            this.notify_error(format!("添付を取得できません: {e}"), window, cx)
+                        }
+                    });
+                })
+                .detach();
+            }
             Err(e) => self.notify_error(format!("添付を開けません: {e}"), window, cx),
         }
     }
 
+    fn open_attachment(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_blob(id, window, cx, |_, path, _, cx| cx.open_with_system(&path));
+    }
+
     fn save_attachment_as(
-        &self,
+        &mut self,
         meta: AttachmentMeta,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let src = match app::store(cx).blob_path(meta.attachment_id) {
-            Ok(Some(p)) => p,
-            _ => {
-                self.notify_error("添付の実体がこの端末にありません".into(), window, cx);
-                return;
+        self.with_blob(meta.attachment_id, window, cx, move |_, src, window, cx| {
+            let dir = dirs::download_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let rx = cx.prompt_for_new_path(&dir, Some(&meta.file_name));
+            cx.spawn_in(window, async move |this, cx| {
+                if let Ok(Ok(Some(dest))) = rx.await
+                    && let Err(e) = std::fs::copy(&src, &dest)
+                {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.notify_error(format!("保存できません: {e}"), window, cx)
+                    });
+                }
+            })
+            .detach();
+        });
+    }
+
+    /// 編集中に、他の端末で付箋が更新されたか（docs/spec.md 4.4）
+    fn updated_elsewhere(&self, cx: &App) -> bool {
+        match (&self.editing, &self.snapshot) {
+            (Some(session), Some(n)) => {
+                n.op_id != session.base_op && n.edited_by != app::store(cx).device_id()
             }
-        };
-        let dir = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let rx = cx.prompt_for_new_path(&dir, Some(&meta.file_name));
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(dest))) = rx.await
-                && let Err(e) = std::fs::copy(&src, &dest)
-            {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.notify_error(format!("保存できません: {e}"), window, cx)
-                });
-            }
-        })
-        .detach();
+            _ => false,
+        }
     }
 
     fn remove_attachment(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -834,6 +865,12 @@ impl Render for NoteWindow {
                 this.attach_paths(paths.paths().to_vec(), window, cx)
             }))
             .child(self.render_bar(&n.color, cx))
+            .when(self.updated_elsewhere(cx), |d| {
+                // 編集中の内容は上書きしない。保存すると後勝ちで自分の版が最新になり、相手の版は履歴に残る
+                d.child(div().px_2().py_0p5().text_xs().bg(rgba(0xff99004d)).child(
+                    "他の端末で更新されました（保存すると上書きし、相手の版は履歴に残ります）",
+                ))
+            })
             .child(
                 div()
                     .flex_1()

@@ -3,7 +3,7 @@
 //! - 一覧: 全付箋（本文の先頭・色・更新日時・更新した端末）。検索。クリックでデスクトップに表示して前面に出す
 //! - ごみ箱: 削除した付箋と復元
 //! - 履歴: 選んだ付箋の版を時系列で表示し、「この版に戻す」で revert 版を作る
-//! - 設定: サーバー URL・トークン・端末名（同期は Phase 4 で有効化）、フォント、添付の上限、自動起動
+//! - 設定: サーバー URL・トークン・端末名、フォント、添付の上限、自動起動
 
 use fusen_core::{NoteSnapshot, Revision, RevisionKind};
 use gpui_kit::component::{
@@ -153,7 +153,7 @@ impl ManagerWindow {
         if device_id == app::store(cx).device_id() {
             "この端末".to_string()
         } else {
-            // 端末名の同期は Phase 4。それまでは ID の先頭で見分ける
+            // 他の端末の名前は同期しない（版には端末 ID だけがある）ので、ID の先頭で見分ける
             format!("端末 {}", &device_id.to_string()[..8])
         }
     }
@@ -231,6 +231,8 @@ impl ManagerWindow {
             );
         }
         cx.global_mut::<app::FusenApp>().settings = new;
+        // 同期の接続先を更新する（URL・トークンが空なら同期を止める）
+        app::apply_settings(cx);
         // フォントなどを付箋に反映する
         cx.refresh_windows();
         window.push_notification(Notification::success("設定を保存しました"), cx);
@@ -534,11 +536,7 @@ impl ManagerWindow {
                     .gap_4()
                     .p_4()
                     .max_w(px(560.))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child("同期（Phase 4 で有効になります）"),
-                    )
+                    .child(div().font_weight(FontWeight::BOLD).child("同期"))
                     .child(field(
                         "サーバー URL",
                         &f.server_url,
@@ -608,6 +606,20 @@ impl Render for ManagerWindow {
                     .children(ManagerTab::ALL.iter().map(|t| Tab::new().label(t.label()))),
             )
             .child(div().flex_1().min_h_0().child(body))
+            .child(
+                // 同期の状態（接続中 / オフライン / 未送信の件数）
+                h_flex()
+                    .px_3()
+                    .py_1()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(app::sync_status(cx).label())
+                    .child(div().flex_1())
+                    .child(format!("この端末: {}", app::settings(cx).device_name)),
+            )
     }
 }
 
