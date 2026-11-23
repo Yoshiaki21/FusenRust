@@ -46,6 +46,7 @@
 - DB: SQLite（端末・サーバー）
 - server: axum 0.8（ws）、tokio、clap、tokio-util。テストは reqwest 0.13・tokio-tungstenite
 - core: rusqlite 0.37（bundled）、uuid（v7）、chrono、sha2、thiserror。テストは tempfile・futures-lite
+- desktop の同期: tokio（専用スレッド）、reqwest 0.13（rustls / aws-lc-rs）、tokio-tungstenite 0.30
 - 主要ライブラリ: jxl-oxide（JXL）、image（PNG/JPEG）、ksni（Linux トレイ。D-002）、zbus（KWin 制御）、async-channel、tracing
 
 ### 3. ディレクトリ構造 / Critical Paths（最重要）
@@ -73,6 +74,8 @@
 | 設定・保存場所・既定サイズ | `crates/fusen-desktop/src/settings.rs` |
 | 付箋の色 | `crates/fusen-desktop/src/palette.rs` |
 | 画像のデコードとキャッシュ | `crates/fusen-desktop/src/images.rs` |
+| 同期サービス（専用スレッドの tokio・WebSocket・再接続・状態） | `crates/fusen-desktop/src/sync/mod.rs` |
+| サーバーとの HTTP 通信（Transport の実装・URL の正規化） | `crates/fusen-desktop/src/sync/http.rs` |
 | OS 依存の共通型（命令・通知・付箋のタイトル） | `crates/fusen-desktop/src/platform/mod.rs` |
 | KDE: KWin スクリプト・D-Bus（単一インスタンス・位置の通知）・トレイ・自動起動・シグナル | `crates/fusen-desktop/src/platform/linux_kde.rs` |
 | Phase 0 の検証プログラム（参考用） | `crates/fusen-desktop/examples/p0_*.rs` |
@@ -88,6 +91,7 @@
 - コメントは日本語。OS 依存は `cfg(target_os)` で分けて `platform/` に置く
 - fusen-proto / fusen-core に gpui・OS 固有の依存を入れない（Android 版で UniFFI から使うため）
 - 版は追記のみ。UPDATE は仮番号→確定番号の置き換え（`store.rs` の `confirm`）だけ。未同期の版は負の仮番号（D-004）
+- 版を後から指すときは番号ではなく op_id で覚える（番号は同期で変わる。D-010）
 - エラーは anyhow（アプリ）/ thiserror（ライブラリ）。`unwrap()` はテスト以外禁止。ログは tracing
 
 ### 5. よく使うコマンド
