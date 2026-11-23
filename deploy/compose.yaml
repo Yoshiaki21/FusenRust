@@ -1,10 +1,34 @@
-# 本番用: Proxmox 上の Docker で fusen-server を動かす
+# 本番用: Proxmox VE の LXC コンテナ（fusen-server 専用）の中の Docker で fusen-server を動かす
 #
+# ■ 準備（LXC の中で）
+#   1. リポジトリを置く（git clone など）
+#   2. 設定ファイルを作る:     cp deploy/.env.example deploy/.env   （必要なら値を変える）
+#   3. データの置き場所を作る: mkdir -p deploy/data && sudo chown 10001:10001 deploy/data
+#      （コンテナは非 root のユーザー uid 10001 で動くため。名前付きボリュームにする場合は不要）
+#
+# ■ 起動・トークンの発行
 #   docker compose -f deploy/compose.yaml up -d --build
 #   docker compose -f deploy/compose.yaml exec fusen-server fusen-server token create --device cachyos-main
+#   docker compose -f deploy/compose.yaml exec fusen-server fusen-server token list
+#   curl http://127.0.0.1:8080/healthz      # → ok（ポートは .env の FUSEN_PORT）
 #
-# 前段にリバースプロキシ（Caddy）を置き、TLS は Caddy が担当する（deploy/Caddyfile.example）。
-# サーバーは 127.0.0.1 だけで待ち受け、外からは Caddy 経由でだけ接続させる。
+# ■ LXC の中でビルドしたくない場合（Rust のビルドには数 GB のメモリと時間がかかる）
+#   開発 PC でイメージを作って運ぶ:
+#     podman build -f deploy/Containerfile -t fusen-server:latest .
+#     podman save fusen-server:latest | ssh <LXC> docker load
+#   LXC では --build を付けずに: docker compose -f deploy/compose.yaml up -d
+#
+# ■ リバースプロキシ（Caddy）
+#   TLS は Caddy が担当する（deploy/Caddyfile.example）。
+#   - Caddy を同じ LXC で動かす: FUSEN_BIND=127.0.0.1（既定。外から直接つながらない）
+#   - Caddy が別の LXC・ホスト:  FUSEN_BIND=0.0.0.0 にして、Proxmox のファイアウォールで
+#     Caddy のホストからだけ FUSEN_PORT に接続できるようにする
+#
+# ■ バックアップ
+#   データは FUSEN_DATA_PATH（既定 deploy/data）にすべてある（fusen.db と blobs/）。
+#   止めてからディレクトリごとコピーするのが確実（動かしたままなら sqlite3 の .backup を使う）。
+
+name: fusen
 
 services:
   fusen-server:
@@ -18,10 +42,20 @@ services:
       FUSEN_LISTEN: 0.0.0.0:8080
       FUSEN_DATA_DIR: /data
       # Caddyfile の request_body max_size と合わせる
-      FUSEN_MAX_UPLOAD_BYTES: "524288000"
-      RUST_LOG: info
+      FUSEN_MAX_UPLOAD_BYTES: ${FUSEN_MAX_UPLOAD_BYTES:-524288000}
+      RUST_LOG: ${RUST_LOG:-info}
     volumes:
-      # バックアップはこのディレクトリをまるごとコピーする（fusen.db と blobs/）
-      - ./data:/data
+      - ${FUSEN_DATA_PATH:-./data}:/data
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${FUSEN_BIND:-127.0.0.1}:${FUSEN_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

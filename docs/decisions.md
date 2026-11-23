@@ -108,7 +108,10 @@
 - **コンテナ**: ビルドではワークスペースのメンバーを proto / core / server に絞り、デスクトップ（gpui）の依存を取得しない。
   実行は debian-slim、非 root（uid 10001）、`/data` をボリュームにする。
   podman は OCI 形式では HEALTHCHECK を無視する（Docker では有効）。
-- **Quadlet（テスト用）はこの PC（127.0.0.1:8080）だけに公開**。compose（本番）も 127.0.0.1 で待ち受け、外からは Caddy 経由だけにする。
+- **Quadlet（テスト用）はこの PC（127.0.0.1:9090）だけに公開**。開発 PC では 8080 を別のサーバー（llama）が使っているため（ユーザー確認）。
+- **本番は Proxmox VE の fusen-server 専用 LXC の中の Docker**（ユーザー確認）。`deploy/compose.yaml` の待ち受けアドレス・ポート・データの場所・上限は
+  `deploy/.env`（`.env.example` をコピー）で変える。既定は 127.0.0.1:8080（Caddy が同じ LXC）。Caddy が別ホストなら `FUSEN_BIND=0.0.0.0` にしてファイアウォールで絞る。
+  データのディレクトリはコンテナのユーザー（uid 10001）が書き込めるようにしておく。LXC でビルドしない場合は `podman save | docker load` でイメージを運ぶ。
 - テスト用の HTTP の Transport は `crates/fusen-server/tests/api.rs` に置いた。デスクトップ用は Phase 4 で作る。
 
 ---
