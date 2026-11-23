@@ -70,15 +70,36 @@ for (const w of workspace.windowList()) {{
 /// Wayland のウィンドウにはアプリ側から「最大化させない」と伝える手段がなく、
 /// KWin のウィンドウルール（maximizehoriz/maximizevert）はユーザー全体の設定を書き換えてしまう。
 /// そこでアプリが動いている間だけ、付箋ウィンドウがタイル化・最大化されたら即座に元へ戻す。
-/// （画面端への移動中に KWin のプレビュー枠は出るが、離すと元の大きさのまま残る）
+/// 取り消すと KWin はドラッグ前の位置に戻すので、ドラッグ中に覚えた位置（画面内に補正）へ置き直す。
 pub fn install_guard() -> anyhow::Result<()> {
     let script = r#"
+// 付箋を画面（パネルを除く領域）の中に収める
+function clampToArea(w, g) {
+    const a = workspace.clientArea(KWin.MaximizeArea, w);
+    const x = Math.min(Math.max(g.x, a.x), a.x + a.width - g.width);
+    const y = Math.min(Math.max(g.y, a.y), a.y + a.height - g.height);
+    return {x: x, y: y, width: g.width, height: g.height};
+}
 function guard(w) {
     if (w.__fusenGuard || w.caption.indexOf("fusen-note:") !== 0) return;
     w.__fusenGuard = true;
-    w.tileChanged.connect(function () { if (w.tile) w.tile = null; });
+    w.__fusenLast = null;
+    // ドラッグ中の位置を覚えておく（タイル化を取り消すと KWin はドラッグ前の位置に戻すため）
+    w.interactiveMoveResizeStarted.connect(function () { w.__fusenLast = null; });
+    w.interactiveMoveResizeStepped.connect(function (g) {
+        if (!w.tile && w.maximizeMode === 0) {
+            w.__fusenLast = {x: g.x, y: g.y, width: g.width, height: g.height};
+        }
+    });
+    // 取り消した後、ドラッグを離した位置に置き直す
+    function restoreDropPosition() {
+        if (w.__fusenLast) w.frameGeometry = clampToArea(w, w.__fusenLast);
+    }
+    w.tileChanged.connect(function () {
+        if (w.tile) { w.tile = null; restoreDropPosition(); }
+    });
     w.maximizedChanged.connect(function () {
-        if (w.maximizeMode !== 0) w.setMaximize(false, false);
+        if (w.maximizeMode !== 0) { w.setMaximize(false, false); restoreDropPosition(); }
     });
 }
 function watch(w) {
