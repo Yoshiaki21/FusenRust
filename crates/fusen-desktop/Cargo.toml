@@ -6,17 +6,25 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+fusen-core.workspace = true
 # Markdown の色分け（編集時）のために tree-sitter の Markdown 文法を有効にする
 gpui-kit = { workspace = true, features = ["tree-sitter-markdown", "tree-sitter-markdown-inline"] }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
 jxl-oxide = { version = "0.12.6", features = ["image"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 async-channel = "2.5.0"
+dirs = "6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # KDE のトレイ（StatusNotifierItem）。D-Bus だけで動き、GTK のイベントループを必要としないため採用
 ksni = { version = "0.3.7", features = ["blocking"] }
-# KWin スクリプトを D-Bus で読み込み、普通のウィンドウの「常に背面/最前面」等を切り替えるため
+# KWin スクリプトの実行、単一インスタンス（D-Bus 名の所有）、KWin からの位置の通知の受け取り
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+# SIGTERM（ログアウト・シャットダウン）を受けて編集中の内容を保存してから終了するため
+signal-hook = "0.3"
