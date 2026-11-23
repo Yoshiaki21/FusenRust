@@ -1,0 +1,27 @@
+# 本番用: Proxmox 上の Docker で fusen-server を動かす
+#
+#   docker compose -f deploy/compose.yaml up -d --build
+#   docker compose -f deploy/compose.yaml exec fusen-server fusen-server token create --device cachyos-main
+#
+# 前段にリバースプロキシ（Caddy）を置き、TLS は Caddy が担当する（deploy/Caddyfile.example）。
+# サーバーは 127.0.0.1 だけで待ち受け、外からは Caddy 経由でだけ接続させる。
+
+services:
+  fusen-server:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile
+    image: fusen-server:latest
+    container_name: fusen-server
+    restart: unless-stopped
+    environment:
+      FUSEN_LISTEN: 0.0.0.0:8080
+      FUSEN_DATA_DIR: /data
+      # Caddyfile の request_body max_size と合わせる
+      FUSEN_MAX_UPLOAD_BYTES: "524288000"
+      RUST_LOG: info
+    volumes:
+      # バックアップはこのディレクトリをまるごとコピーする（fusen.db と blobs/）
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8080:8080"

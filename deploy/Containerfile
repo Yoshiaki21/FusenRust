@@ -1,0 +1,41 @@
+# fusen-server のコンテナイメージ（podman / Docker 共用のマルチステージビルド）
+#
+# ビルド（リポジトリのルートで）:
+#   podman build -f deploy/Containerfile -t fusen-server:latest .
+#   docker build -f deploy/Containerfile -t fusen-server:latest .
+#
+# データはすべて /data に置く（fusen.db と blobs/）。ボリュームをマウントして使う。
+
+# ---- ビルド ----
+FROM docker.io/library/rust:1-slim-bookworm AS build
+WORKDIR /src
+
+# サーバーに必要なクレートだけをコピーする。
+# デスクトップアプリ（gpui）の依存を取得しないよう、ワークスペースのメンバーを絞る。
+COPY Cargo.toml Cargo.lock ./
+COPY crates/fusen-proto crates/fusen-proto
+COPY crates/fusen-core crates/fusen-core
+COPY crates/fusen-server crates/fusen-server
+RUN sed -i 's|^members = .*|members = ["crates/fusen-proto", "crates/fusen-core", "crates/fusen-server"]|' Cargo.toml \
+ && sed -i '/^gpui-kit = /d' Cargo.toml \
+ && cargo build --release -p fusen-server \
+ && strip target/release/fusen-server
+
+# ---- 実行 ----
+FROM docker.io/library/debian:bookworm-slim
+# SQLite は rusqlite に同梱（bundled）なので追加のライブラリは不要
+RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin fusen \
+ && mkdir -p /data && chown fusen:fusen /data
+COPY --from=build /src/target/release/fusen-server /usr/local/bin/fusen-server
+
+ENV FUSEN_LISTEN=0.0.0.0:8080 \
+    FUSEN_DATA_DIR=/data \
+    FUSEN_MAX_UPLOAD_BYTES=524288000 \
+    RUST_LOG=info
+USER fusen
+VOLUME ["/data"]
+EXPOSE 8080
+# podman は OCI 形式では HEALTHCHECK を無視する（--format docker で有効）。Docker では有効
+HEALTHCHECK --interval=30s --timeout=3s CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
+ENTRYPOINT ["/usr/local/bin/fusen-server"]
+CMD ["serve"]

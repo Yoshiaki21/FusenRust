@@ -1,0 +1,5 @@
+# コンテナのビルドに送らないもの（podman / Docker 共通）
+target/
+.git/
+**/*.db
+data/

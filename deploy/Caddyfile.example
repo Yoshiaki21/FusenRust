@@ -1,0 +1,27 @@
+# Caddy の設定例（fusen-server の前段のリバースプロキシ）
+#
+# - TLS（HTTPS）は Caddy が自動で取得・更新する
+# - WebSocket（/api/v1/ws）は reverse_proxy がそのまま中継する（特別な設定は不要）
+# - アップロードの上限はサーバーの FUSEN_MAX_UPLOAD_BYTES（既定 500 MB）に合わせる
+
+fusen.example.com {
+	# 添付のアップロード（PUT /api/v1/blobs/...）の上限。サーバー側と同じ値にする
+	request_body {
+		max_size 500MB
+	}
+
+	reverse_proxy 127.0.0.1:8080 {
+		# 大きなファイルのアップロード・ダウンロードで途中で切られないように
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+		# WebSocket を長く保つ（サーバーは 30 秒ごとに ping を送る）
+		stream_timeout 24h
+	}
+
+	encode zstd gzip
+	log {
+		output file /var/log/caddy/fusen.log
+	}
+}

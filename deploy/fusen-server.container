@@ -1,0 +1,33 @@
+# テスト用: CachyOS 上の podman（Quadlet）で fusen-server を動かす
+#
+# 使い方:
+#   1. イメージを作る（リポジトリのルートで）
+#        podman build -f deploy/Containerfile -t localhost/fusen-server:latest .
+#   2. このファイルを置いて systemd に読み込ませる（ユーザー単位）
+#        mkdir -p ~/.config/containers/systemd
+#        cp deploy/fusen-server.container ~/.config/containers/systemd/
+#        systemctl --user daemon-reload
+#        systemctl --user start fusen-server
+#   3. トークンを発行する
+#        podman exec fusen-server fusen-server token create --device cachyos-main
+#   4. 動作確認
+#        curl http://127.0.0.1:8080/healthz
+
+[Unit]
+Description=FusenRust 同期サーバー（テスト）
+
+[Container]
+Image=localhost/fusen-server:latest
+ContainerName=fusen-server
+# データは名前付きボリュームに置く（podman volume inspect fusen-data で場所を確認できる）
+Volume=fusen-data:/data:Z
+# テストなのでこの PC からだけ接続できるようにする（他の PC から試すなら 127.0.0.1: を外す）
+PublishPort=127.0.0.1:8080:8080
+Environment=FUSEN_MAX_UPLOAD_BYTES=524288000
+Environment=RUST_LOG=info
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
