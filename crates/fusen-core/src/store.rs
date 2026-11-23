@@ -32,8 +32,10 @@ const KEY_LAST_SERVER_SEQ: &str = "last_server_seq";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoteSnapshot {
     pub note_id: Uuid,
-    /// 最新の版の番号（未同期なら負の仮番号）
+    /// 最新の版の番号（未同期なら負の仮番号。同期で確定番号に変わる）
     pub rev: i64,
+    /// 最新の版の操作 ID（番号が仮番号から確定番号に変わっても同じ版を指す）
+    pub op_id: Uuid,
     pub content: String,
     pub color: String,
     pub attachments: Vec<Uuid>,
@@ -469,6 +471,18 @@ impl Store {
             .query_map([note_id.to_string()], row_to_revision)?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
+    }
+
+    /// 操作 ID の版の今の番号（編集を始めた版の番号が、同期で仮番号から確定番号に変わっても追えるように）
+    pub fn rev_of_op(&self, note_id: Uuid, op_id: Uuid) -> Result<Option<i64>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT rev FROM revisions WHERE note_id = ?1 AND op_id = ?2",
+                params![note_id.to_string(), op_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// 指定の版
@@ -1008,6 +1022,7 @@ fn snapshot(conn: &Connection, note_id: Uuid) -> Result<NoteSnapshot> {
     Ok(NoteSnapshot {
         note_id,
         rev: head.rev,
+        op_id: head.op_id,
         content: head.content,
         color: head.color,
         attachments: head.attachments,

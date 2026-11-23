@@ -500,3 +500,31 @@ fn pull_pages_through_changes() {
         fusen_core::sync::CHANGES_PAGE_SIZE.to_string()
     );
 }
+
+#[test]
+fn rev_of_op_follows_renumbering() {
+    let server = FakeServer::default();
+    let (_da, a) = device();
+    let r = a.create_note("元", color::YELLOW).unwrap();
+    let head = a.note(r.note_id).unwrap();
+    assert_eq!((head.rev, head.op_id), (-1, r.op_id));
+    // 編集を始めた後に同期で仮番号が確定番号に変わっても、操作 ID で今の番号が分かる
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    assert_eq!(a.rev_of_op(r.note_id, r.op_id).unwrap(), Some(1));
+    let saved = a
+        .save_edit(
+            r.note_id,
+            "編集",
+            None,
+            a.rev_of_op(r.note_id, r.op_id).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.base_rev, Some(1));
+    let rep = block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    assert!(
+        rep.pushed.conflicts.is_empty(),
+        "古い仮番号を送らないので競合にならない"
+    );
+    assert_eq!(a.rev_of_op(r.note_id, uuid::Uuid::now_v7()).unwrap(), None);
+}
