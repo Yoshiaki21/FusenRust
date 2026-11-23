@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fusen-desktop"]
+members = ["crates/fusen-proto", "crates/fusen-core", "crates/fusen-desktop"]
 
 [workspace.package]
 edition = "2024"
@@ -13,7 +13,20 @@ publish = false
 # gpui-kit の rev を固定すれば gpui のバージョンも自動的に一致する（docs/decisions.md 参照）。
 gpui-kit = { git = "https://github.com/longbridge/gpui-component", rev = "48e53b11762a7ac37835acca889a924c569ff681" }
 
+fusen-proto = { path = "crates/fusen-proto" }
+fusen-core = { path = "crates/fusen-core" }
+
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+mime_guess = "2"
+tempfile = "3"
+futures-lite = "2"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
