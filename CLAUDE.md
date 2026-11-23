@@ -60,9 +60,16 @@
 | `attachment://` 参照の抽出・作成 | `crates/fusen-core/src/markdown.rs` |
 | 同期エンジン・通信のトレイト | `crates/fusen-core/src/sync.rs`（`Transport`） |
 | core のテスト（仮サーバーでの同期を含む） | `crates/fusen-core/tests/` |
-| デスクトップアプリ本体 | `crates/fusen-desktop/src/` |
-| OS 依存コード（KWin スクリプト / Win32） | `crates/fusen-desktop/src/platform/` |
-| Phase 0 の検証プログラム | `crates/fusen-desktop/examples/p0_*.rs`（共通部品は `examples/common/mod.rs`） |
+| 起動・引数・単一インスタンス | `crates/fusen-desktop/src/main.rs` |
+| アプリ全体の状態・命令・付箋ウィンドウの開閉・位置の保存と復元 | `crates/fusen-desktop/src/app.rs` |
+| 付箋ウィンドウ（バー・本文・編集・添付チップ・貼り付け） | `crates/fusen-desktop/src/note_window.rs` |
+| 管理画面（一覧・ごみ箱・履歴・設定） | `crates/fusen-desktop/src/manager.rs` |
+| 設定・保存場所・既定サイズ | `crates/fusen-desktop/src/settings.rs` |
+| 付箋の色 | `crates/fusen-desktop/src/palette.rs` |
+| 画像のデコードとキャッシュ | `crates/fusen-desktop/src/images.rs` |
+| OS 依存の共通型（命令・通知・付箋のタイトル） | `crates/fusen-desktop/src/platform/mod.rs` |
+| KDE: KWin スクリプト・D-Bus（単一インスタンス・位置の通知）・トレイ・自動起動・シグナル | `crates/fusen-desktop/src/platform/linux_kde.rs` |
+| Phase 0 の検証プログラム（参考用） | `crates/fusen-desktop/examples/p0_*.rs` |
 | 細かい判断の記録・Phase 0 の結果 | `docs/decisions.md` |
 | gpui のソース（API 確認用） | `~/.cargo/registry/src/*/gpui-pre-0.3.12/`（examples/layer_shell.rs など） |
 | gpui-component のソース | `~/.cargo/git/checkouts/gpui-component-*/48e53b1/`（examples/, crates/story/） |
@@ -82,7 +89,8 @@
 
 ```bash
 cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --all   # コミット前に必須
-cargo run -p fusen-desktop --example p0_kwin_window     # Phase 0 検証（他に p0_note_surface, p0_wall_overlay, p0_tray）
+cargo run -p fusen-desktop                       # 起動（--new / --show-all / --manager / --quit）
+cargo run -p fusen-desktop -- --profile test     # 別の設定・データで起動（実データを汚さずに試す）
 ```
 
 ### 6. 既知の制約・注意点
@@ -91,7 +99,10 @@ cargo run -p fusen-desktop --example p0_kwin_window     # Phase 0 検証（他�
 - 付箋は layer-shell ではなく普通のウィンドウ＋KWin スクリプト（D-003）。gpui では layer-shell の位置・層を後から変えられないため
 - gpui の `RenderImage` は BGRA。RGBA の画像は R と B を入れ替えて渡す
 - Linux のトレイは `tray-icon` ではなく `ksni`（GTK ループ不要のため）
-- Wayland で普通のウィンドウを常に背面/最前面・タスクバー非表示・位置指定するには KWin スクリプトを D-Bus で実行する（`examples/common/kwin.rs`）。呼び出しは直列化すること
+- Wayland で普通のウィンドウを常に背面/最前面・タスクバー非表示・位置指定するには KWin スクリプトを D-Bus で実行する（`platform/linux_kde.rs`）。呼び出しは専用スレッドで直列化すること
+- gpui-component の Root は CSD ウィンドウに 20px の影を付ける。KWin の位置・サイズは影の内側（`app.rs` の `CSD_SHADOW`）
+- `gpui_kit::*` を glob import したモジュールのテストで `use super::*` すると gpui の `test` マクロと衝突する。必要なものだけ import する
+- zbus の `Builder::name` は名前を奪われる設定。単一インスタンスには `request_name_with_flags(DoNotQueue)` を使う
 
 ### 7. 変更履歴（任意）
 （大きな方針転換があった場合のみ、日付と概要を1行で）
