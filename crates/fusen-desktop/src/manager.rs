@@ -65,6 +65,8 @@ pub struct ManagerWindow {
     history: Vec<Revision>,
     selected_rev: Option<i64>,
     form: SettingsForm,
+    /// 一覧を「この端末に貼ってある付箋」だけに絞るか
+    only_pasted: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,6 +114,7 @@ impl ManagerWindow {
             history: Vec::new(),
             selected_rev: None,
             form,
+            only_pasted: false,
             _subscriptions: subscriptions,
         };
         this.select(tab, note_id, cx);
@@ -136,6 +139,9 @@ impl ManagerWindow {
             tracing::error!("一覧を読めません: {e}");
             Vec::new()
         });
+        if self.only_pasted {
+            self.notes.retain(|n| app::is_on_desktop(cx, n.note_id));
+        }
         self.trash = store.list_trash().unwrap_or_default();
         if let Some(n) = &self.history_note {
             let id = n.note_id;
@@ -251,6 +257,8 @@ impl ManagerWindow {
     ) -> AnyElement {
         let id = n.note_id;
         let title = note_title(&n.content);
+        // この端末のデスクトップに出ているか（貼るかどうかは端末ごと。D-012）
+        let pasted = !in_trash && app::is_on_desktop(cx, id);
         let mut meta = vec![
             n.updated_at
                 .with_timezone(&chrono::Local)
@@ -293,7 +301,24 @@ impl ManagerWindow {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().child(title))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .min_w_0()
+                            .child(div().truncate().child(title))
+                            .when(pasted, |d| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .text_xs()
+                                        .bg(cx.theme().accent)
+                                        .text_color(cx.theme().accent_foreground)
+                                        .child("貼ってある"),
+                                )
+                            }),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -301,6 +326,29 @@ impl ManagerWindow {
                             .child(meta.join(" ・ ")),
                     ),
             )
+            .when(!in_trash, |d| {
+                d.child(if pasted {
+                    Button::new(("unpaste", i))
+                        .small()
+                        .ghost()
+                        .label("外す")
+                        .tooltip("この端末のデスクトップから外す（付箋は消えません）")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.defer(move |cx| app::hide_note(cx, id));
+                        })
+                } else {
+                    Button::new(("paste", i))
+                        .small()
+                        .outline()
+                        .label("貼る")
+                        .tooltip("この端末のデスクトップに貼る")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.defer(move |cx| app::show_note(cx, id));
+                        })
+                })
+            })
             .child(
                 Button::new(("history", i))
                     .small()
@@ -336,6 +384,15 @@ impl ManagerWindow {
                     .gap_2()
                     .p_2()
                     .child(div().flex_1().child(Input::new(&self.search)))
+                    .child(
+                        Checkbox::new("only-pasted")
+                            .label("この端末に貼ってある付箋だけ")
+                            .checked(self.only_pasted)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.only_pasted = *checked;
+                                this.refresh(cx);
+                            })),
+                    )
                     .child(
                         Button::new("new-note")
                             .primary()

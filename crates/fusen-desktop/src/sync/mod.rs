@@ -339,9 +339,14 @@ impl Worker {
             tracing::info!("競合の印が付いた版: {:?}", report.pushed.conflicts);
         }
 
-        // 本文中に表示する画像はすぐ取得する
+        // この端末に貼ってある付箋の、本文中に表示する画像はすぐ取得する
+        // （貼っていない付箋の画像は、貼ったとき・管理画面で見たときに取得する。D-012）
         let mut fetched = false;
-        for meta in self.store.missing_blobs().map_err(|e| e.to_string())? {
+        for meta in self
+            .store
+            .missing_blobs_of_pasted()
+            .map_err(|e| e.to_string())?
+        {
             if !markdown::is_inline_image(&meta.mime) || meta.size > self.max_blob_bytes {
                 continue;
             }

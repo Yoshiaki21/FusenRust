@@ -180,18 +180,11 @@ fn on_remote_changes(cx: &mut App, changed: Vec<Uuid>, new: Vec<Uuid>) {
             notes_changed(cx, id);
             continue;
         }
+        // 他の端末で新しく作られた付箋は、この端末には貼らない（管理画面の一覧に出るだけ。D-012）
         let restored = log_err(store.revision(id, note.rev))
             .is_some_and(|r| r.kind == fusen_core::RevisionKind::Restore);
-        if new.contains(&id) {
-            // 他の端末で新しく作られた付箋: 左上付近に既定サイズで、壁モードで置く
-            log_err(store.ensure_placement(id, DEFAULT_NOTE_WIDTH, DEFAULT_NOTE_HEIGHT));
-            open_note(cx, id, None);
-        } else if restored
-            && log_err(store.placement(id))
-                .flatten()
-                .is_none_or(|p| p.visible)
-        {
-            // 他の端末でごみ箱から戻された
+        if restored && is_pasted_here(&store, id) {
+            // 他の端末でごみ箱から戻された付箋は、ごみ箱に入る前にこの端末に貼ってあった場合だけ貼り直す
             open_note(cx, id, None);
         }
     }
@@ -205,6 +198,19 @@ pub fn refresh_manager(cx: &mut App) {
             manager.update(cx, |m, cx| m.refresh(cx));
         }
     });
+}
+
+/// この端末に貼ってある付箋か（配置があり、デスクトップから外していない）。
+/// 貼るかどうかは端末ごと（配置は同期しない）。配置がない付箋はこの端末には貼っていない（D-012）
+fn is_pasted_here(store: &Store, note_id: Uuid) -> bool {
+    log_err(store.placement(note_id))
+        .flatten()
+        .is_some_and(|p| p.visible)
+}
+
+/// 付箋がこの端末のデスクトップに出ているか（管理画面の表示用）
+pub fn is_on_desktop(cx: &App, note_id: Uuid) -> bool {
+    cx.global::<FusenApp>().notes.contains_key(&note_id)
 }
 
 /// エラーをログに出す（UI に出せない場所で使う）
@@ -228,8 +234,8 @@ fn restore_notes(cx: &mut App) {
 
     for note in log_err(store.list_notes()).unwrap_or_default() {
         let draft = drafts.get(&note.note_id).cloned();
-        // 配置がない付箋（他の端末で作られた付箋など）も表示する
-        let visible = placements.get(&note.note_id).is_none_or(|p| p.visible);
+        // この端末に貼ってある付箋だけを開く（配置がない＝他の端末で作られ、この端末には貼っていない）
+        let visible = placements.get(&note.note_id).is_some_and(|p| p.visible);
         if visible || draft.is_some() {
             open_note(cx, note.note_id, draft);
         }
@@ -296,6 +302,7 @@ pub fn open_note(cx: &mut App, note_id: Uuid, draft: Option<String>) {
             let app = cx.global_mut::<FusenApp>();
             app.notes.insert(note_id, OpenNote { window, view });
             app.awaiting_map.insert(note_id);
+            refresh_manager(cx);
             // Windows: タスクバーから外して隠し、最初の位置を知らせる（KDE では KWin の常駐スクリプトが行う）
             imp::note_window_opened(profile(cx).as_deref(), &caption);
             // 保険: KWin から位置の通知が来ず、透明のまま残ってしまわないよう、少し後に必ず見えるようにする
@@ -344,6 +351,7 @@ pub fn close_note_window(cx: &mut App, note_id: Uuid) {
             .window
             .update(cx, |_, window, _| window.remove_window());
     }
+    refresh_manager(cx);
 }
 
 /// 付箋のウィンドウが閉じられたときに一覧から外す（ウィンドウ側から呼ぶ）
@@ -351,6 +359,7 @@ pub fn forget_note_window(cx: &mut App, note_id: Uuid) {
     let app = cx.global_mut::<FusenApp>();
     app.notes.remove(&note_id);
     app.awaiting_map.remove(&note_id);
+    refresh_manager(cx);
 }
 
 /// 付箋を前面に出す（管理画面の一覧から選んだとき）
@@ -524,6 +533,23 @@ fn cascade_position(store: &Store, note_id: Uuid, x: f64, y: f64) -> (f64, f64) 
 
 /// ウィンドウマネージャーから付箋ウィンドウの位置が届いた
 fn on_window_geometry(
+    cx: &mut App,
+    note_id: Uuid,
+    monitor: Option<String>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    let first = cx.global::<FusenApp>().awaiting_map.contains(&note_id);
+    apply_window_geometry(cx, note_id, monitor, x, y, width, height);
+    if first {
+        // 貼った（配置を保存した）付箋の画像を取得するため、同期を走らせる（画像は貼ってある付箋の分だけ先に取る）
+        cx.global::<FusenApp>().sync.kick();
+    }
+}
+
+fn apply_window_geometry(
     cx: &mut App,
     note_id: Uuid,
     monitor: Option<String>,

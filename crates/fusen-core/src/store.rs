@@ -524,8 +524,29 @@ impl Store {
 
     /// ごみ箱にない付箋の最新の版が参照しているのに、実体がこの端末にない添付
     pub fn missing_blobs(&self) -> Result<Vec<AttachmentMeta>> {
+        self.missing_blobs_of(self.list_notes()?)
+    }
+
+    /// この端末に貼ってある（配置があり表示中の）付箋の添付のうち、実体がまだない添付。
+    /// 画像を先に取得する対象を、この端末に貼ってある付箋に絞るために使う
+    pub fn missing_blobs_of_pasted(&self) -> Result<Vec<AttachmentMeta>> {
+        let pasted: std::collections::HashSet<Uuid> = self
+            .placements()?
+            .into_iter()
+            .filter(|p| p.visible)
+            .map(|p| p.note_id)
+            .collect();
+        let notes = self
+            .list_notes()?
+            .into_iter()
+            .filter(|n| pasted.contains(&n.note_id))
+            .collect();
+        self.missing_blobs_of(notes)
+    }
+
+    fn missing_blobs_of(&self, notes: Vec<NoteSnapshot>) -> Result<Vec<AttachmentMeta>> {
         let mut out: Vec<AttachmentMeta> = Vec::new();
-        for n in self.list_notes()? {
+        for n in notes {
             for m in self.attachments_of(&n)? {
                 if !self.blobs.contains(&m.sha256) && !out.iter().any(|o| o.sha256 == m.sha256) {
                     out.push(m);

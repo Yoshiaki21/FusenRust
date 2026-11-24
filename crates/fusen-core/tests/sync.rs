@@ -436,6 +436,36 @@ fn attachments_are_sent_before_revision_and_fetched() {
 }
 
 #[test]
+fn only_pasted_notes_need_blobs_first() {
+    let server = FakeServer::default();
+    let (_da, a) = device();
+    let (_db, b) = device();
+
+    let id = a.create_note("画像つき", color::YELLOW).unwrap().note_id;
+    let m = a
+        .import_attachment_bytes(id, "p.png", b"PNGDATA", 1024)
+        .unwrap();
+    a.add_attachment(id, m.attachment_id, None).unwrap();
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    block_on(sync::sync_once(&b, &online(&server))).unwrap();
+
+    // 他の端末で作られた付箋は、この端末には貼られていない（配置がない）
+    assert!(b.placement(id).unwrap().is_none());
+    assert_eq!(b.missing_blobs().unwrap().len(), 1);
+    assert!(b.missing_blobs_of_pasted().unwrap().is_empty());
+
+    // 貼ると対象になる。デスクトップから外すと対象から外れる
+    let p = b.ensure_placement(id, 280.0, 320.0).unwrap();
+    assert_eq!(b.missing_blobs_of_pasted().unwrap().len(), 1);
+    b.set_placement(&fusen_core::Placement {
+        visible: false,
+        ..p
+    })
+    .unwrap();
+    assert!(b.missing_blobs_of_pasted().unwrap().is_empty());
+}
+
+#[test]
 fn fetched_blob_with_wrong_hash_is_rejected() {
     let server = FakeServer::default();
     let (_da, a) = device();
