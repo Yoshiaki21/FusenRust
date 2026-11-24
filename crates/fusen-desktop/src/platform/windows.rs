@@ -63,9 +63,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, TranslateMessage, WINDOWPOS, WM_APP, WM_COPYDATA, WM_ENDSESSION,
-    WM_EXITSIZEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_QUERYENDSESSION,
-    WM_SYSCOMMAND, WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_MAXIMIZEBOX, WS_OVERLAPPED,
+    WM_EXITSIZEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_QUERYENDSESSION, WM_SYSCOMMAND,
+    WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_OVERLAPPED,
 };
 
 use super::{AppEvent, Command, caption_prefix, note_id_from_caption};
@@ -615,7 +615,7 @@ fn setup_note_window(hwnd: HWND) -> bool {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let ex = (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
-        // 最大化させない（画面上端へのドラッグ・ダブルクリックでの最大化を防ぐ）
+        // 最大化させない（画面上端へのドラッグでの最大化を防ぐ）
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_MAXIMIZEBOX as isize));
     }
@@ -907,8 +907,8 @@ unsafe extern "system" fn note_subclass_proc(
             }
             return r;
         }
-        // バー（HTCAPTION）のダブルクリックで最大化させない
-        WM_NCLBUTTONDBLCLK => return 0,
+        // 最大化させない。バー（HTCAPTION）のダブルクリックは捨てずに gpui に渡す（タイトルの編集を始めるため。
+        // gpui が処理すれば既定の処理は呼ばれず、処理しなくても SC_MAXIMIZE はここで止める）
         WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_MAXIMIZE as usize => return 0,
         WM_EXITSIZEMOVE => {
             let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };

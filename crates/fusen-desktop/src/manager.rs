@@ -504,12 +504,15 @@ impl ManagerWindow {
                         .gap_2()
                         .border_b_1()
                         .border_color(cx.theme().border)
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .child(format!("色: {}", color_label(&r.color))),
-                        )
+                        .child(div().flex_1().text_sm().truncate().child(format!(
+                            "タイトル: {} ・ 色: {}",
+                            if r.title.is_empty() {
+                                "（なし）"
+                            } else {
+                                r.title.as_str()
+                            },
+                            color_label(&r.color)
+                        )))
                         .child(
                             Button::new("revert")
                                 .primary()

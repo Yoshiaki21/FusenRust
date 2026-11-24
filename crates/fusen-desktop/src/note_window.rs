@@ -1,6 +1,6 @@
 //! 付箋 1 枚のウィンドウ（`docs/spec.md` 5.1, 5.2）。
 //!
-//! - 上部のバー: ドラッグで移動。最前面の切り替え・色・メニュー
+//! - 上部のバー: ドラッグで移動。最前面の切り替え・タイトル（ダブルクリックで編集）・色・メニュー
 //! - 本文: 整形表示（Markdown）⇔ ダブルクリックで編集。フォーカスが外れたら保存
 //! - 本文の下: 添付の一覧（チップ）
 //! - 右下のつまみ: サイズ変更
@@ -18,7 +18,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    input::{Editor, EditorState},
+    input::{Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     notification::Notification,
     text::TextView,
@@ -53,6 +53,9 @@ pub struct NoteWindow {
     always_on_top: bool,
     editing: Option<EditSession>,
     editor: Entity<EditorState>,
+    /// タイトルの入力欄（バーの中。編集中だけ表示する）
+    title_input: Entity<InputState>,
+    editing_title: bool,
     focus_handle: FocusHandle,
     /// 管理画面から一時的に前面に出した（フォーカスが外れたら元の層に戻す）
     temporarily_raised: bool,
@@ -73,15 +76,23 @@ impl NoteWindow {
                 .soft_wrap(true)
         });
         let editor_focus = editor.read(cx).focus_handle(cx);
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("タイトル"));
 
         let subscriptions = vec![
             // 編集中にフォーカスが外れたら保存して整形表示に戻す
             cx.on_blur(&editor_focus, window, |this, _, cx| this.finish_editing(cx)),
+            // タイトル: Enter かフォーカスが外れたら確定する
+            cx.subscribe(&title_input, |this, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_title(cx);
+                }
+            }),
             // 他のウィンドウをクリックしてこのウィンドウが非アクティブになったとき
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     return;
                 }
+                this.commit_title(cx);
                 this.finish_editing(cx);
                 if std::mem::take(&mut this.temporarily_raised) {
                     app::apply_layer(cx, this.note_id, this.always_on_top);
@@ -109,6 +120,8 @@ impl NoteWindow {
             always_on_top: false,
             editing: None,
             editor,
+            title_input,
+            editing_title: false,
             focus_handle: cx.focus_handle(),
             temporarily_raised: false,
             _subscriptions: subscriptions,
@@ -214,7 +227,45 @@ impl NoteWindow {
 
     /// 終了時に呼ぶ（ウィンドウがなくても保存できる）
     pub fn finish_editing_without_window(&mut self, cx: &mut Context<Self>) {
+        self.commit_title(cx);
         self.finish_editing(cx);
+    }
+
+    // ------------------------------------------------------------------
+    // タイトル
+    // ------------------------------------------------------------------
+
+    /// タイトルの編集を始める（バーのダブルクリック・メニューから）
+    fn start_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(n) = &self.snapshot else { return };
+        let title = n.title.clone();
+        self.editing_title = true;
+        self.title_input.update(cx, |state, cx| {
+            state.set_value(title, window, cx);
+            state.focus(window, cx);
+            state.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// タイトルを確定して保存する（同じなら版を作らない。空にするとタイトルを外す）
+    fn commit_title(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.editing_title) {
+            return;
+        }
+        let title = self.title_input.read(cx).value().to_string();
+        match self.store(cx).set_title(self.note_id, &title) {
+            Ok(Some(_)) => app::notes_changed(cx, self.note_id),
+            Ok(None) => {}
+            Err(e) => tracing::error!("タイトルを保存できません: {e}"),
+        }
+        self.reload(cx);
+    }
+
+    /// タイトルの編集をやめる（Esc）
+    fn cancel_title(&mut self, cx: &mut Context<Self>) {
+        self.editing_title = false;
+        cx.notify();
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) {
@@ -550,7 +601,8 @@ impl NoteWindow {
     // 描画
     // ------------------------------------------------------------------
 
-    fn render_bar(&self, color: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_bar(&self, n: &NoteSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let color = n.color.as_str();
         let pinned = self.always_on_top;
         let view = cx.entity();
         let id = self.note_id;
@@ -607,7 +659,12 @@ impl NoteWindow {
             .xsmall()
             .icon(Icon::from(Lucide::Ellipsis))
             .dropdown_menu(move |menu, window, _| {
-                menu.item(PopupMenuItem::new("ファイルを添付…").on_click(
+                menu.item(PopupMenuItem::new("タイトルを編集…").on_click(
+                    window.listener_for(&view, |this, _, window, cx| {
+                        this.start_title_edit(window, cx)
+                    }),
+                ))
+                .item(PopupMenuItem::new("ファイルを添付…").on_click(
                     window.listener_for(&view, |this, _, window, cx| this.choose_files(window, cx)),
                 ))
                 .item(PopupMenuItem::new("新しい付箋").on_click(|_, _, cx| {
@@ -645,16 +702,63 @@ impl NoteWindow {
             .gap_0p5()
             .bg(palette::bar(color))
             .cursor_move()
-            // バーを押したらウィンドウマネージャーの移動を始める（モニターもまたげる）
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            // バーを押したらウィンドウマネージャーの移動を始める（モニターもまたげる）。
+            // ダブルクリックならタイトルの編集を始める（Windows では OS の移動の領域のダブルクリックも、
+            // gpui が click_count = 2 の押下として届けてくれる。処理すれば最大化は起きない）
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if ev.click_count >= 2 {
+                        cx.stop_propagation();
+                        this.start_title_edit(window, cx);
+                    } else {
+                        window.start_window_move();
+                    }
+                }),
+            )
             // Windows の gpui は start_window_move が未実装なので、バーを OS の移動の領域（HTCAPTION）にする
             .when(cfg!(windows), |d| {
                 d.window_control_area(WindowControlArea::Drag)
             })
             .child(no_drag(div()).child(pin))
-            .child(div().flex_1())
+            .child(self.render_title(n, cx))
             .child(no_drag(div()).child(colors))
             .child(no_drag(div()).child(menu))
+    }
+
+    /// バーの中のタイトル。表示中はバーの一部（ドラッグで移動できる）、編集中は入力欄
+    fn render_title(&self, n: &NoteSnapshot, cx: &mut Context<Self>) -> AnyElement {
+        if self.editing_title {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // Esc で取り消す（入力欄が使わなかった Esc はここに届く前に捕まえる）
+                .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.cancel_title(cx);
+                        this.focus_handle.focus(window, cx);
+                    }
+                }))
+                .child(
+                    Input::new(&self.title_input)
+                        .xsmall()
+                        .h(px(20.))
+                        .bg(rgba(0xffffffb3)),
+                )
+                .into_any_element();
+        }
+        div()
+            .flex_1()
+            .min_w_0()
+            .px_1()
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .truncate()
+            .child(n.title.clone())
+            .into_any_element()
     }
 
     fn render_body(&self, n: &NoteSnapshot, cx: &mut Context<Self>) -> AnyElement {
@@ -873,7 +977,7 @@ impl Render for NoteWindow {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.attach_paths(paths.paths().to_vec(), window, cx)
             }))
-            .child(self.render_bar(&n.color, cx))
+            .child(self.render_bar(&n, cx))
             .when(self.updated_elsewhere(cx), |d| {
                 // 編集中の内容は上書きしない。保存すると後勝ちで自分の版が最新になり、相手の版は履歴に残る
                 d.child(div().px_2().py_0p5().text_xs().bg(rgba(0xff99004d)).child(
