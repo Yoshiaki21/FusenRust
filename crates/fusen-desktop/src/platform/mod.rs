@@ -1,7 +1,7 @@
 //! OS 依存の処理。OS ごとの実装は `cfg(target_os)` で分ける。
 //!
 //! - Linux（KDE Plasma 6 / Wayland）: [`linux_kde`]
-//! - Windows 11: Phase 5 で `windows.rs` を追加する
+//! - Windows 11: [`windows`]
 
 use uuid::Uuid;
 
@@ -9,6 +9,10 @@ use uuid::Uuid;
 pub mod linux_kde;
 #[cfg(target_os = "linux")]
 pub use linux_kde as imp;
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+pub use windows as imp;
 
 /// アプリへの命令（コマンドライン引数・2 つ目のプロセス・トレイから）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

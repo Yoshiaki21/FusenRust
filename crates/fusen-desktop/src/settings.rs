@@ -11,7 +11,10 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 /// 既定のフォント（日本語を正しく表示するため）
+#[cfg(not(windows))]
 pub const DEFAULT_FONT: &str = "Noto Sans CJK JP";
+#[cfg(windows)]
+pub const DEFAULT_FONT: &str = "Yu Gothic UI";
 /// 新しい付箋の既定のサイズ（論理ピクセル。docs/decisions.md D-005）
 pub const DEFAULT_NOTE_WIDTH: f64 = 280.0;
 pub const DEFAULT_NOTE_HEIGHT: f64 = 320.0;

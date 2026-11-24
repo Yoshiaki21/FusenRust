@@ -10,6 +10,9 @@
 //!
 //! 2 つ目のプロセスは 1 つ目に命令を渡して終了する（単一インスタンス）。
 
+// Windows のリリース版はコンソールを出さない（ログはファイルに書く）
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod images;
 mod manager;
@@ -33,16 +36,45 @@ fn main() {
     if let Err(e) = run() {
         tracing::error!("{e:#}");
         eprintln!("FusenRust: {e:#}");
+        #[cfg(windows)]
+        imp::show_error(&format!("{e:#}"));
         std::process::exit(1);
     }
 }
 
 fn init_tracing() {
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info,wgpu_hal=warn,wgpu_core=warn,naga=warn".into())
+    };
+    // Windows のリリース版はコンソールがないので、%LOCALAPPDATA%\fusen-rust\fusen-desktop.log に追記する。
+    // 作り直すと、命令を渡すだけの 2 つ目のプロセスが 1 つ目のログを消してしまうので追記にし、
+    // 大きくなったら（5 MB）起動時に .old へ移す
+    #[cfg(all(windows, not(debug_assertions)))]
+    if let Some(file) = dirs::data_local_dir()
+        .map(|d| d.join("fusen-rust"))
+        .and_then(|d| std::fs::create_dir_all(&d).ok().map(|_| d))
+        .and_then(|d| {
+            let path = d.join("fusen-desktop.log");
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+                let _ = std::fs::rename(&path, d.join("fusen-desktop.log.old"));
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        })
+    {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .try_init();
+        return;
+    }
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,wgpu_hal=warn,wgpu_core=warn,naga=warn".into()),
-        )
+        .with_env_filter(filter())
         .try_init();
 }
 

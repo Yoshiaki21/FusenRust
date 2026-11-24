@@ -557,7 +557,12 @@ impl NoteWindow {
         let current = color.to_string();
 
         // ボタンの押下がバーのドラッグ（ウィンドウ移動）にならないようにする
-        let no_drag = |e: Div| e.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // バーの上のボタン類はドラッグ移動の対象から外す（Windows ではバーを HTCAPTION にするので、
+        // occlude しないとボタンの上も移動の領域になってクリックが届かない）
+        let no_drag = |e: Div| {
+            e.occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
 
         let pin = Button::new("pin")
             .ghost()
@@ -642,6 +647,10 @@ impl NoteWindow {
             .cursor_move()
             // バーを押したらウィンドウマネージャーの移動を始める（モニターもまたげる）
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            // Windows の gpui は start_window_move が未実装なので、バーを OS の移動の領域（HTCAPTION）にする
+            .when(cfg!(windows), |d| {
+                d.window_control_area(WindowControlArea::Drag)
+            })
             .child(no_drag(div()).child(pin))
             .child(div().flex_1())
             .child(no_drag(div()).child(colors))

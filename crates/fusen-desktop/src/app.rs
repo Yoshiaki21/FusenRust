@@ -22,10 +22,13 @@ use crate::sync::{FetchResult, ServerConfig, SyncEvent, SyncService, SyncState, 
 pub struct PlatformGlobal(pub imp::PlatformHandle);
 impl Global for PlatformGlobal {}
 
-/// gpui-component の Root が、クライアント側で描くウィンドウの周りに付ける影の幅（Linux は 20px）。
+/// gpui-component の Root が、クライアント側で描くウィンドウの周りに付ける影の幅（Linux は 20px、他は 0）。
 /// ウィンドウマネージャーが扱う位置・サイズ（配置として保存する値）は影の内側なので、
 /// ウィンドウを開くときは影の分だけ大きくする（しないと再起動のたびに付箋が縮む）。
+#[cfg(target_os = "linux")]
 const CSD_SHADOW: f64 = 20.0;
+#[cfg(not(target_os = "linux"))]
+const CSD_SHADOW: f64 = 0.0;
 
 /// 開いている付箋ウィンドウ
 struct OpenNote {
@@ -266,13 +269,15 @@ pub fn open_note(cx: &mut App, note_id: Uuid, draft: Option<String>) {
         titlebar: None,
         window_decorations: Some(WindowDecorations::Client),
         window_background: WindowBackgroundAppearance::Transparent,
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(0.), px(0.)),
-            size: size(
+        // 最初は画面の中央に開く（保存済みの配置は表示後に適用する。Wayland では位置は無視される）
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(
                 px((w + CSD_SHADOW * 2.0) as f32),
                 px((h + CSD_SHADOW * 2.0) as f32),
             ),
-        })),
+            cx,
+        ))),
         window_min_size: Some(size(
             px((160.0 + CSD_SHADOW * 2.0) as f32),
             px((120.0 + CSD_SHADOW * 2.0) as f32),
@@ -291,6 +296,8 @@ pub fn open_note(cx: &mut App, note_id: Uuid, draft: Option<String>) {
             let app = cx.global_mut::<FusenApp>();
             app.notes.insert(note_id, OpenNote { window, view });
             app.awaiting_map.insert(note_id);
+            // Windows: タスクバーから外して隠し、最初の位置を知らせる（KDE では KWin の常駐スクリプトが行う）
+            imp::note_window_opened(profile(cx).as_deref(), &caption);
             // 保険: KWin から位置の通知が来ず、透明のまま残ってしまわないよう、少し後に必ず見えるようにする
             let profile = profile(cx);
             cx.spawn(async move |cx| {

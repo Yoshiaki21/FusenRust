@@ -366,6 +366,10 @@ for (const w of workspace.windowList()) {{
     submit_oneshot(profile, source);
 }
 
+/// gpui のウィンドウを開いた直後に呼ぶ。KDE では常駐の制御スクリプトが新しいウィンドウを見つけて
+/// 透明にし、最初の位置を知らせるので、ここでは何もしない
+pub fn note_window_opened(_profile: Option<&str>, _caption: &str) {}
+
 /// 透明にしておいた付箋ウィンドウを見えるようにする（位置の通知が来なかったときの保険）
 pub fn reveal_note_window(profile: Option<&str>, caption: &str) {
     let source = format!(
