@@ -50,7 +50,7 @@
 | 端末側 DB のスキーマ・マイグレーション | `crates/fusen-core/src/db.rs`（追加は MIGRATIONS の末尾に足すだけ） |
 | 付箋・版・ごみ箱・revert・下書き・配置・同期の記録 | `crates/fusen-core/src/store.rs`（`Store`） |
 | 添付の実体（SHA-256・重複排除・上限） | `crates/fusen-core/src/blob.rs` |
-| `attachment://` 参照の抽出・作成 | `crates/fusen-core/src/markdown.rs` |
+| `attachment://` 参照の抽出・作成、一覧に出す付箋の名前（`display_title`） | `crates/fusen-core/src/markdown.rs` |
 | 同期エンジン・通信のトレイト | `crates/fusen-core/src/sync.rs`（`Transport`） |
 | 付箋の色のキー | `crates/fusen-core/src/color.rs`（表示色は desktop の `palette.rs`） |
 | core のテスト（仮サーバーでの同期を含む） | `crates/fusen-core/tests/` |
@@ -91,6 +91,8 @@
 - fusen-proto / fusen-core に gpui・OS 固有の依存を入れない（Android 版で UniFFI から使うため）
 - 版は追記のみ。UPDATE は仮番号→確定番号の置き換え（`store.rs` の `confirm`）だけ。未同期の版は負の仮番号（D-004）
 - 同じ版の再送は op_id（UUIDv7）で冪等にする。版を後から指すときも番号ではなく op_id で覚える（番号は同期で変わる。D-004, D-010）
+- 付箋を貼るかどうかは端末ごと。配置（placements、同期しない）がない付箋はこの端末には貼っていない。他の端末の付箋を自動で貼らない（D-012）
+- 版に項目を足すときは、proto に `#[serde(default)]`、端末とサーバーの両方の DB にマイグレーションを足す（D-013 の title が例）
 - ビューの更新中からアプリ全体の処理（`app::notes_changed` など）を呼ぶときは `cx.defer` を通す（同じエンティティの二重借用を避けるため）
 - エラーは anyhow（アプリ）/ thiserror（ライブラリ）。`unwrap()` はテスト以外禁止。ログは tracing
 - コミットは小さく Conventional Commits。push はユーザーの指示があるときだけ。フェーズの完了ごとに報告して許可をもらう
