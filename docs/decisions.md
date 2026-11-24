@@ -132,6 +132,42 @@
 - **同期の状態の表示**: 管理画面の下部（接続済み / オフライン（理由）/ 未設定・未送信 n 件）とトレイのツールチップ。
 - **端末名**は表示（管理画面の下部）にだけ使う。他の端末の名前は同期しない（版には端末 ID だけ。表示は ID の先頭 8 文字）。
 
+## D-011 Phase 5（Windows 11 版）の実装上の判断（2026-11-24）
+
+- **OS 依存は `platform/windows.rs` に置き、`platform/linux_kde.rs` と同じ関数を揃える**（`app.rs` などは共通のまま）。
+  Win32 API は `windows-sys` 0.60 で呼ぶ。付箋ウィンドウの HWND は Linux と同じくタイトル（`fusen-note:<プロファイル>:<ID>`）で探す。
+- **gpui の Windows 版の制約**:
+  - `start_window_move` / `start_window_resize` が未実装。バーは `window_control_area(Drag)`（OS の `HTCAPTION`）にし、
+    右下のつまみはサブクラスの `WM_NCHITTEST` で `HTBOTTOMRIGHT` を返す。バーの上のボタンは `occlude()` で移動の領域から外す。
+  - gpui-component は Windows では影を付けない（`SHADOW_SIZE` = 0）ので `CSD_SHADOW` も 0。
+  - gpui のマニフェスト（PerMonitorV2）は依存先の build.rs で作られ、こちらの実行ファイルには入らない。
+    起動時に `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` を呼ぶ。
+  - **gpui の更新処理（App を借用中）の中で ShowWindow / SetWindowPos を呼ぶと、gpui がその場で届いたメッセージを捨てる**
+    （"RefCell already borrowed"）。付箋ウィンドウの操作はキューに積み、メインスレッドのメッセージ専用ウィンドウへの
+    メッセージで後から実行する（`run_later`）。クローク（DWM の属性）だけはメッセージが出ないのでその場で行う。
+- **壁モード**: `HWND_BOTTOM` に置き、サブクラスの `WM_WINDOWPOSCHANGING` で前に出ようとする z 順の変更を `HWND_BOTTOM` に書き換える。
+  **最前面モード**: `HWND_TOPMOST`。管理画面から選んだときは一時的に書き換えをやめる（フォーカスが外れたらアプリが元に戻す）。
+- **タスクバーに出さない**: `WS_EX_TOOLWINDOW`。gpui は表示した状態でウィンドウを返すので、一度隠して出し直す（クローク中なので見えない）。
+  最大化はさせない（`WS_MAXIMIZEBOX` を外し、バーのダブルクリックと `SC_MAXIMIZE` を無視する）。
+- **位置が決まるまで見せない（D-008）**: KWin の透明化の代わりに DWM のクローク（`DWMWA_CLOAK`）。
+  開いた直後に `note_window_opened` が最初の位置をアプリに送り、KDE と同じ流れ（保存済みの配置を適用 → 見せる）に乗せる。
+- **座標**: 位置は仮想スクリーンの物理ピクセル、大きさは論理ピクセル（`GetDpiForWindow` で割る）。値は DWM の拡張フレーム
+  （見えている枠）で読み書きする。拡大率の違うモニターへは、位置だけ動かしてから（`WM_DPICHANGED` が起きる）大きさを決め直す。
+  保存した位置にモニターがなければ主モニターの左上付近に置く。新しい付箋は画面の中央に開く（Wayland では位置は無視される）。
+  位置の通知は移動・サイズ変更の終わり（`WM_EXITSIZEMOVE`）。
+- **単一インスタンス**: 名前付きミューテックス `Local\FusenRust.<プロファイル>`。2 つ目のプロセスは隠しウィンドウ
+  （クラス `FusenRust.Ipc.<プロファイル>`）を探して `WM_COPYDATA` で引数を渡す。`AllowSetForegroundWindow` で前面に出す権利を譲る。
+- **トレイ**: D-002 のとおり `tray-icon`。隠しウィンドウと同じ専用スレッドで作り、メッセージループを回す。アイコンは仮（コードで描いた黄色い付箋）。
+- **ログオフ・シャットダウン**: 隠しウィンドウ（メッセージ専用ではなくトップレベル）で `WM_ENDSESSION` を受け、終了の命令を送り、
+  終了時の保存が終わるまで最大 5 秒待つ。
+- **自動起動**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` の値（`FusenRust` / `FusenRust (<プロファイル>)`）。
+- **ファイルを既定のアプリで開く**: gpui の `open_with_system`（Windows でも動く）のままで変更なし。
+- **既定のフォント**は Windows では `Yu Gothic UI`（Noto Sans CJK JP は標準では入っていないため）。
+- **配布**: まずは zip（`scripts/package-windows.ps1`。`fusen-desktop.exe` と README.txt だけ。インストール不要）。
+  リリース版はコンソールを出さず（`windows_subsystem = "windows"`）、ログは `%LOCALAPPDATA%\fusen-rust\fusen-desktop.log` に追記する
+  （命令を渡すだけの 2 つ目のプロセスが消さないよう追記。5 MB を超えたら起動時に `.old` へ）。起動できないときはメッセージボックスで知らせる。
+- **データの場所**（`dirs`）: データ・設定とも `%APPDATA%\fusen-rust\`（`--profile X` は `profiles\X\`）。
+
 ---
 
 ## Phase 0 検証結果（CachyOS / KDE Plasma 6 / Wayland）

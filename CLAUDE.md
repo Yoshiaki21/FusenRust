@@ -36,6 +36,7 @@
 - server: axum 0.8（ws）、tokio、tokio-util、clap、getrandom。テストは reqwest 0.13（json, stream）・tokio-tungstenite
 - desktop の同期: 専用スレッドの tokio、reqwest 0.13（rustls / aws-lc-rs）、tokio-tungstenite 0.30（rustls、OS の証明書）
 - desktop の Linux 固有: zbus 5（KWin スクリプト・単一インスタンス・位置の通知）、ksni（トレイ。D-002）、signal-hook（SIGTERM で保存終了）
+- desktop の Windows 固有: windows-sys 0.60（Win32 API。付箋ウィンドウ・単一インスタンス・自動起動）、tray-icon 0.26（トレイ。D-002, D-011）
 - その他: jxl-oxide（JXL）、image（PNG/JPEG）、async-channel、dirs、tracing
 - 配備: podman（テスト、Quadlet）/ Docker（本番、Proxmox VE の専用 LXC 内）、前段に Caddy
 
@@ -72,10 +73,12 @@
 | サーバーとの HTTP 通信（Transport の実装・URL の正規化） | `crates/fusen-desktop/src/sync/http.rs` |
 | OS 依存の共通型（命令・通知・付箋のタイトル） | `crates/fusen-desktop/src/platform/mod.rs` |
 | KDE: KWin スクリプト・D-Bus（単一インスタンス・位置の通知）・トレイ・自動起動・シグナル | `crates/fusen-desktop/src/platform/linux_kde.rs` |
-| Windows: Win32 API など（Phase 5 で作成。まだない） | `crates/fusen-desktop/src/platform/windows.rs` |
+| Windows: 付箋ウィンドウの制御（サブクラス・層・DPI・クローク）・単一インスタンス・トレイ・自動起動 | `crates/fusen-desktop/src/platform/windows.rs` |
+| Windows 版の配布用 zip を作る | `scripts/package-windows.ps1`（`target/dist/` にできる） |
 | Phase 0 の検証プログラム（参考用。本体からは使わない） | `crates/fusen-desktop/examples/p0_*.rs`, `examples/common/` |
 | 細かい判断の記録・Phase 0 の結果 | `docs/decisions.md` |
 | 端末のデータ・設定（Linux） | `~/.local/share/fusen-rust/`（fusen.db, blobs/）、`~/.config/fusen-rust/settings.json`。`--profile X` は各 `profiles/X/` |
+| 端末のデータ・設定・ログ（Windows） | `%APPDATA%\fusen-rust\`（fusen.db, blobs\, settings.json）。リリース版のログは `%LOCALAPPDATA%\fusen-rust\fusen-desktop.log` |
 | gpui のソース（API 確認用） | `~/.cargo/registry/src/*/gpui-pre-0.3.12/`（examples/, src/window.rs など） |
 | gpui-component のソース | `~/.cargo/git/checkouts/gpui-component-*/48e53b1/`（examples/, crates/story/, crates/component/src/） |
 
@@ -122,6 +125,9 @@ podman exec fusen-server fusen-server token create --device <端末名>
 - 同期は gpui の実行器ではなく専用スレッドの tokio で動く（reqwest / WebSocket が tokio を必要とするため。D-010）
 - 開発 PC: 8080 は llama サーバーが使用中。テスト用の fusen-server は podman の `fusen-server` コンテナ（127.0.0.1:9090）で常用中なので、試験で同名のコンテナを起動・削除しない
 - 試験でアプリを起動するときは `--profile` を使い、`~/.local/share/fusen-rust` 本体（ユーザーの実データ）は消さない
+- Windows: gpui の更新処理の中から ShowWindow / SetWindowPos を呼ぶとメッセージが捨てられる。付箋ウィンドウの操作は `platform/windows.rs` の `run_later` を通す（D-011）
+- Windows: gpui は `start_window_move` / `start_window_resize` が未実装。バーは `window_control_area(Drag)`、右下のつまみはサブクラスの `WM_NCHITTEST`（D-011）
+- Windows: PowerShell 5.1 用の .ps1 に日本語を書くときは UTF-8（BOM 付き）で保存する（BOM なしだと壊れて読まれる）
 - コンテナのビルドは `.dockerignore` / `.containerignore` で target/ を除く（target は数十 GB になる）
 - サーバーのコンテナは uid 10001 で動く。本番の bind mount のデータディレクトリは事前に chown が必要
 
@@ -130,6 +136,7 @@ podman exec fusen-server fusen-server token create --device <端末名>
 
 - 2026-11-23: 付箋ウィンドウを layer-shell から普通のウィンドウ＋KWin スクリプトに変更（D-003）
 - 2026-11-23: gpui の固定を git rev から gpui-kit の rev 固定（gpui-pre =0.3.12）に変更（D-001。gpui-component 側の変更に合わせる）
+- 2026-11-24: Windows 11 版を追加（`platform/windows.rs`。D-011）
 
 ---
 
