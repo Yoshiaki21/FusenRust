@@ -134,6 +134,7 @@ impl Transport for Client<'_> {
             device_id: req.device_id,
             edited_at: req.edited_at,
             kind: req.kind,
+            title: req.title.clone(),
             content: req.content.clone(),
             color: req.color.clone(),
             attachments: req.attachments.clone(),
@@ -337,6 +338,38 @@ fn concurrent_edits_are_marked_as_conflict() {
     );
     // 両端末の履歴が一致する
     assert_eq!(a.history(r.note_id).unwrap(), b.history(r.note_id).unwrap());
+}
+
+#[test]
+fn own_title_change_during_edit_is_not_a_conflict() {
+    let server = FakeServer::default();
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let r = a.create_note("元", color::YELLOW).unwrap();
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    block_on(sync::sync_once(&b, &online(&server))).unwrap();
+
+    // A: 本文の編集を始めた（土台は 1）→ 編集中にタイトルを変えて送る → 本文を保存して送る
+    a.set_title(r.note_id, "題").unwrap();
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    a.save_edit(r.note_id, "A の編集", None, Some(1)).unwrap();
+    let ra = block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    assert!(
+        ra.pushed.conflicts.is_empty(),
+        "自分の変更だけなら競合ではない"
+    );
+    let na = a.note(r.note_id).unwrap();
+    assert_eq!((na.title.as_str(), na.content.as_str()), ("題", "A の編集"));
+
+    // B: 編集を始めた（土台は 3）後に A の変更を取り込んでから保存 → 競合の印が付く
+    a.set_title(r.note_id, "A の題").unwrap();
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    block_on(sync::sync_once(&b, &online(&server))).unwrap();
+    let base = 3;
+    b.save_edit(r.note_id, "B の編集", None, Some(base))
+        .unwrap();
+    let rb = block_on(sync::sync_once(&b, &online(&server))).unwrap();
+    assert_eq!(rb.pushed.conflicts.len(), 1, "他の端末の変更があれば競合");
 }
 
 #[test]

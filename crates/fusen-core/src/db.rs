@@ -84,6 +84,10 @@ CREATE TABLE sync_state (
   value TEXT NOT NULL
 );
 "#,
+    // v2: 付箋のタイトル（docs/decisions.md D-013）
+    r#"
+ALTER TABLE revisions ADD COLUMN title TEXT NOT NULL DEFAULT '';
+"#,
 ];
 
 /// 接続の初期設定とマイグレーションを行う。

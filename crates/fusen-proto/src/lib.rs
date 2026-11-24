@@ -31,6 +31,12 @@ pub enum RevisionKind {
     Restore,
     /// 過去の版に戻す
     Revert,
+    /// タイトルの変更
+    Title,
+    /// このアプリの版が知らない種類（新しい版のアプリが作った版）。
+    /// 知らない種類を受け取っても同期が止まらないようにするため
+    #[serde(other)]
+    Other,
 }
 
 impl RevisionKind {
@@ -44,6 +50,8 @@ impl RevisionKind {
             Self::Delete => "delete",
             Self::Restore => "restore",
             Self::Revert => "revert",
+            Self::Title => "title",
+            Self::Other => "other",
         }
     }
 }
@@ -78,6 +86,8 @@ impl FromStr for RevisionKind {
             "delete" => Self::Delete,
             "restore" => Self::Restore,
             "revert" => Self::Revert,
+            "title" => Self::Title,
+            "other" => Self::Other,
             other => return Err(UnknownRevisionKind(other.to_string())),
         })
     }
@@ -98,6 +108,9 @@ pub struct Revision {
     /// 端末の時刻（表示用。順序の判定には使わない）
     pub edited_at: DateTime<Utc>,
     pub kind: RevisionKind,
+    /// タイトル（空なら付けていない。表示では本文の 1 行目で代用する）
+    #[serde(default)]
+    pub title: String,
     /// Markdown 本文（その版の全文）
     pub content: String,
     /// 付箋の色（パレットのキー）
@@ -119,6 +132,8 @@ pub struct PushRevisionRequest {
     pub device_id: Uuid,
     pub edited_at: DateTime<Utc>,
     pub kind: RevisionKind,
+    #[serde(default)]
+    pub title: String,
     pub content: String,
     pub color: String,
     pub attachments: Vec<Uuid>,
@@ -134,6 +149,7 @@ impl PushRevisionRequest {
             device_id: r.device_id,
             edited_at: r.edited_at,
             kind: r.kind,
+            title: r.title.clone(),
             content: r.content.clone(),
             color: r.color.clone(),
             attachments: r.attachments.clone(),
@@ -222,6 +238,8 @@ mod tests {
             RevisionKind::Delete,
             RevisionKind::Restore,
             RevisionKind::Revert,
+            RevisionKind::Title,
+            RevisionKind::Other,
         ] {
             assert_eq!(k.as_str().parse::<RevisionKind>().unwrap(), k);
             assert_eq!(
@@ -230,6 +248,11 @@ mod tests {
             );
         }
         assert!("create".parse::<RevisionKind>().is_err());
+        // 知らない種類（新しい版のアプリが作った版）を受け取っても読める
+        assert_eq!(
+            serde_json::from_str::<RevisionKind>("\"pin\"").unwrap(),
+            RevisionKind::Other
+        );
     }
 
     #[test]
@@ -242,6 +265,7 @@ mod tests {
             device_id: Uuid::now_v7(),
             edited_at: Utc::now(),
             kind: RevisionKind::Edit,
+            title: "買い物".into(),
             content: "# 見出し\n本文".into(),
             color: "yellow".into(),
             attachments: vec![Uuid::now_v7()],
@@ -256,5 +280,12 @@ mod tests {
         let req = PushRevisionRequest::from_revision(&r);
         assert_eq!(req.op_id, r.op_id);
         assert_eq!(req.base_rev, Some(2));
+        assert_eq!(req.title, "買い物");
+
+        // タイトルのない（古い形式の）JSON は空のタイトルとして読む
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("title");
+        let old: Revision = serde_json::from_value(v).unwrap();
+        assert_eq!(old.title, "");
     }
 }

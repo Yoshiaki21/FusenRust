@@ -1,6 +1,6 @@
 //! 管理画面（`docs/spec.md` 5.3）。通常のウィンドウ 1 つにタブで並べる。
 //!
-//! - 一覧: 全付箋（本文の先頭・色・更新日時・更新した端末）。検索。クリックでデスクトップに表示して前面に出す
+//! - 一覧: 全付箋（タイトル（なければ本文の 1 行目）・色・更新日時・更新した端末・この端末に貼ってあるか）。検索。クリックでデスクトップに表示して前面に出す
 //! - ごみ箱: 削除した付箋と復元
 //! - 履歴: 選んだ付箋の版を時系列で表示し、「この版に戻す」で revert 版を作る
 //! - 設定: サーバー URL・トークン・端末名、フォント、添付の上限、自動起動
@@ -77,8 +77,9 @@ impl ManagerWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("本文・添付ファイル名で検索"));
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("タイトル・本文・添付ファイル名で検索")
+        });
         let s = app::settings(cx).clone();
         let input = |value: String, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).default_value(value))
@@ -256,7 +257,7 @@ impl ManagerWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = n.note_id;
-        let title = note_title(&n.content);
+        let title = n.display_title();
         // この端末のデスクトップに出ているか（貼るかどうかは端末ごと。D-012）
         let pasted = !in_trash && app::is_on_desktop(cx, id);
         let mut meta = vec![
@@ -546,7 +547,7 @@ impl ManagerWindow {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .truncate()
-                    .child(format!("履歴: {}", note_title(&note.content))),
+                    .child(format!("履歴: {}", note.display_title())),
             )
             .child(
                 h_flex()
@@ -691,29 +692,6 @@ fn empty(msg: &str) -> Div {
         .child(msg.to_string())
 }
 
-/// 一覧に出す題名: 本文の最初の空でない行（Markdown の記号を少し落とす）
-pub fn note_title(content: &str) -> String {
-    let line = content
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
-    // 見出し・リスト・引用・チェックボックスの記号を外す（各段階で前の空白も落とす）
-    let t = line.trim_start_matches('#').trim_start();
-    let t = t.trim_start_matches(['-', '*', '>', '+']).trim_start();
-    let t = t
-        .strip_prefix("[ ]")
-        .or_else(|| t.strip_prefix("[x]"))
-        .or_else(|| t.strip_prefix("[X]"))
-        .unwrap_or(t)
-        .trim();
-    if t.is_empty() {
-        "（空の付箋）".to_string()
-    } else {
-        t.chars().take(80).collect()
-    }
-}
-
 fn kind_label(k: RevisionKind) -> &'static str {
     match k {
         RevisionKind::Edit => "編集",
@@ -723,6 +701,8 @@ fn kind_label(k: RevisionKind) -> &'static str {
         RevisionKind::Delete => "ごみ箱へ移動",
         RevisionKind::Restore => "復元",
         RevisionKind::Revert => "版を戻す",
+        RevisionKind::Title => "タイトルの変更",
+        RevisionKind::Other => "その他",
     }
 }
 
@@ -732,20 +712,4 @@ fn color_label(key: &str) -> &'static str {
         .find(|(k, _, _)| *k == key)
         .map(|(_, l, _)| *l)
         .unwrap_or("不明")
-}
-
-#[cfg(test)]
-mod tests {
-    // gpui_kit::* には gpui の test 属性マクロが含まれ、#[test] と衝突するので必要なものだけ使う
-    use super::note_title;
-
-    #[test]
-    fn titles() {
-        assert_eq!(note_title("\n\n# 見出し\n本文"), "見出し");
-        assert_eq!(note_title("- [ ] 買い物"), "買い物");
-        assert_eq!(note_title("* [x] 済み"), "済み");
-        assert_eq!(note_title("> 引用"), "引用");
-        assert_eq!(note_title(""), "（空の付箋）");
-        assert_eq!(note_title("![x](attachment://a)"), "![x](attachment://a)");
-    }
 }

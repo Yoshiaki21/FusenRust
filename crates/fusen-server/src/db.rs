@@ -70,6 +70,10 @@ CREATE TABLE tokens (
   revoked_at   TEXT
 );
 "#,
+    // v2: 付箋のタイトル（docs/decisions.md D-013）
+    r#"
+ALTER TABLE revisions ADD COLUMN title TEXT NOT NULL DEFAULT '';
+"#,
 ];
 
 /// SQLite の接続（全リクエストで共有。書き込みは 1 つずつ）
@@ -216,8 +220,8 @@ pub fn push_revision(
     let edited_at = fmt_time(req.edited_at);
     tx.execute(
         "INSERT INTO revisions (note_id, rev, server_seq, op_id, device_id, edited_at, kind, content,
-           color, attachments, deleted, base_rev, conflict, received_at, token_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+           color, attachments, deleted, base_rev, conflict, received_at, token_id, title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             note_id.to_string(),
             rev,
@@ -235,6 +239,7 @@ pub fn push_revision(
             conflict,
             fmt_time(Utc::now()),
             token_id,
+            req.title,
         ],
     )?;
     tx.execute(
@@ -256,7 +261,7 @@ pub fn push_revision(
 }
 
 const REV_COLS: &str = "note_id, rev, server_seq, op_id, device_id, edited_at, kind, content, \
-                        color, attachments, deleted, base_rev, conflict";
+                        color, attachments, deleted, base_rev, conflict, title";
 
 /// 指定の受付番号より後の版（最大 `limit` 件）と、それらが参照する添付のメタデータ
 pub fn changes(conn: &Connection, since: i64, limit: u32) -> Result<ChangesResponse, ApiError> {
@@ -504,6 +509,7 @@ fn row_to_revision(r: &Row<'_>) -> rusqlite::Result<Revision> {
         deleted: r.get(10)?,
         base_rev: r.get(11)?,
         conflict: r.get(12)?,
+        title: r.get(13)?,
     })
 }
 
@@ -524,6 +530,7 @@ mod tests {
             device_id: Uuid::now_v7(),
             edited_at: Utc::now(),
             kind: RevisionKind::Edit,
+            title: String::new(),
             content: content.into(),
             color: "yellow".into(),
             attachments: vec![],

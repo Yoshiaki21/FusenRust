@@ -36,6 +36,8 @@ pub struct NoteSnapshot {
     pub rev: i64,
     /// 最新の版の操作 ID（番号が仮番号から確定番号に変わっても同じ版を指す）
     pub op_id: Uuid,
+    /// タイトル（空なら付けていない）
+    pub title: String,
     pub content: String,
     pub color: String,
     pub attachments: Vec<Uuid>,
@@ -162,6 +164,7 @@ impl Store {
             NewRevision {
                 note_id,
                 kind: RevisionKind::Edit,
+                title: String::new(),
                 content: content.to_string(),
                 color: color.to_string(),
                 attachments: Vec::new(),
@@ -200,7 +203,7 @@ impl Store {
             .collect()
     }
 
-    /// 本文と添付のファイル名で検索する（ごみ箱にない付箋。大文字小文字を区別しない）
+    /// タイトル・本文・添付のファイル名で検索する（ごみ箱にない付箋。大文字小文字を区別しない）
     pub fn search(&self, query: &str) -> Result<Vec<NoteSnapshot>> {
         let q = query.to_lowercase();
         let notes = self.list_notes()?;
@@ -209,7 +212,8 @@ impl Store {
         }
         let mut out = Vec::new();
         for n in notes {
-            let hit = n.content.to_lowercase().contains(&q)
+            let hit = n.title.to_lowercase().contains(&q)
+                || n.content.to_lowercase().contains(&q)
                 || self
                     .attachments_of(&n)?
                     .iter()
@@ -246,17 +250,25 @@ impl Store {
             tx.commit()?;
             return Ok(None);
         }
+        // 編集を始めた後にこの端末自身が作った版（色やタイトルの変更）しかなければ、最新の版を土台とする。
+        // そうしないと、自分の変更なのにサーバーで競合の印が付いてしまう
+        let base = match base_rev {
+            Some(b) if !changed_by_others_since(&tx, note_id, b, self.device_id)? => head.rev,
+            Some(b) => b,
+            None => head.rev,
+        };
         let r = append_revision(
             &tx,
             self.device_id,
             NewRevision {
                 note_id,
                 kind: RevisionKind::Edit,
+                title: head.title,
                 content: content.to_string(),
                 color: head.color,
                 attachments,
                 deleted: head.deleted,
-                base_rev: Some(base_rev.unwrap_or(head.rev)),
+                base_rev: Some(base),
             },
         )?;
         tx.commit()?;
@@ -268,6 +280,17 @@ impl Store {
         self.modify(note_id, RevisionKind::Color, |head| {
             (head.color != color).then(|| Changes {
                 color: Some(color.to_string()),
+                ..Default::default()
+            })
+        })
+    }
+
+    /// タイトルを変える（前後の空白と改行は除く）。同じタイトルなら版を作らない。空にするとタイトルを外す。
+    pub fn set_title(&self, note_id: Uuid, title: &str) -> Result<Option<Revision>> {
+        let title = normalize_title(title);
+        self.modify(note_id, RevisionKind::Title, |head| {
+            (head.title != title).then(|| Changes {
+                title: Some(title.clone()),
                 ..Default::default()
             })
         })
@@ -418,6 +441,7 @@ impl Store {
             NewRevision {
                 note_id,
                 kind: RevisionKind::Revert,
+                title: target.title,
                 content: target.content,
                 color: target.color,
                 attachments: target.attachments,
@@ -448,6 +472,7 @@ impl Store {
             NewRevision {
                 note_id,
                 kind,
+                title: ch.title.unwrap_or(head.title),
                 content: ch.content.unwrap_or(head.content),
                 color: ch.color.unwrap_or(head.color),
                 attachments: ch.attachments.unwrap_or(head.attachments),
@@ -847,6 +872,7 @@ impl Store {
 /// 最新の版から変える部分
 #[derive(Default)]
 struct Changes {
+    title: Option<String>,
     content: Option<String>,
     color: Option<String>,
     attachments: Option<Vec<Uuid>>,
@@ -857,6 +883,7 @@ struct Changes {
 struct NewRevision {
     note_id: Uuid,
     kind: RevisionKind,
+    title: String,
     content: String,
     color: String,
     attachments: Vec<Uuid>,
@@ -865,10 +892,33 @@ struct NewRevision {
 }
 
 const REV_COLS: &str = "note_id, rev, server_seq, op_id, device_id, edited_at, kind, content, \
-                        color, attachments, deleted, base_rev, conflict";
+                        color, attachments, deleted, base_rev, conflict, title";
 const REV_COLS_R: &str = "r.note_id, r.rev, r.server_seq, r.op_id, r.device_id, r.edited_at, \
-                          r.kind, r.content, r.color, r.attachments, r.deleted, r.base_rev, r.conflict";
+                          r.kind, r.content, r.color, r.attachments, r.deleted, r.base_rev, \
+                          r.conflict, r.title";
 const PLACEMENT_COLS: &str = "note_id, monitor_key, x, y, width, height, always_on_top, visible";
+
+/// 版 `base_rev` より後に、他の端末が作った版があるか（版が見つからなければ true とみなす）。
+/// 順序は履歴と同じ（受付順、未送信の版は作った順で末尾）
+fn changed_by_others_since(
+    conn: &Connection,
+    note_id: Uuid,
+    base_rev: i64,
+    me: Uuid,
+) -> Result<bool> {
+    let rows: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT rev, device_id FROM revisions WHERE note_id = ?1
+             ORDER BY server_seq IS NULL, server_seq, rev DESC",
+        )?
+        .query_map([note_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some(pos) = rows.iter().position(|(rev, _)| *rev == base_rev) else {
+        return Ok(true);
+    };
+    let me = me.to_string();
+    Ok(rows[pos + 1..].iter().any(|(_, device)| *device != me))
+}
 
 /// 仮番号で版を追加し、outbox に入れて、付箋の最新の状態を更新する
 fn append_revision(tx: &Transaction<'_>, device_id: Uuid, n: NewRevision) -> Result<Revision> {
@@ -886,6 +936,7 @@ fn append_revision(tx: &Transaction<'_>, device_id: Uuid, n: NewRevision) -> Res
         device_id,
         edited_at: Utc::now(),
         kind: n.kind,
+        title: n.title,
         content: n.content,
         color: n.color,
         attachments: n.attachments,
@@ -905,7 +956,7 @@ fn append_revision(tx: &Transaction<'_>, device_id: Uuid, n: NewRevision) -> Res
 fn insert_revision(conn: &Connection, r: &Revision) -> Result<()> {
     conn.execute(
         &format!(
-            "INSERT INTO revisions ({REV_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+            "INSERT INTO revisions ({REV_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
         ),
         params![
             r.note_id.to_string(),
@@ -921,6 +972,7 @@ fn insert_revision(conn: &Connection, r: &Revision) -> Result<()> {
             r.deleted,
             r.base_rev,
             r.conflict,
+            r.title,
         ],
     )?;
     Ok(())
@@ -1044,6 +1096,7 @@ fn snapshot(conn: &Connection, note_id: Uuid) -> Result<NoteSnapshot> {
         note_id,
         rev: head.rev,
         op_id: head.op_id,
+        title: head.title,
         content: head.content,
         color: head.color,
         attachments: head.attachments,
@@ -1125,6 +1178,7 @@ fn row_to_revision(r: &Row<'_>) -> rusqlite::Result<Revision> {
         deleted: r.get(10)?,
         base_rev: r.get(11)?,
         conflict: r.get(12)?,
+        title: r.get(13)?,
     })
 }
 
@@ -1169,6 +1223,25 @@ fn parse_time_str(s: &str) -> Result<DateTime<Utc>> {
 }
 
 /// RFC3339（UTC、精度は落とさない）
+/// タイトルの最大の長さ（文字数）
+const MAX_TITLE_CHARS: usize = 200;
+
+/// 保存するタイトルに整える: 改行・タブは空白にし、前後の空白を除き、長すぎれば切る
+fn normalize_title(title: &str) -> String {
+    let one_line: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    one_line.trim().chars().take(MAX_TITLE_CHARS).collect()
+}
+
+impl NoteSnapshot {
+    /// 一覧などに出す名前（タイトル、なければ本文の 1 行目）
+    pub fn display_title(&self) -> String {
+        crate::markdown::display_title(&self.title, &self.content)
+    }
+}
+
 fn fmt_time(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }

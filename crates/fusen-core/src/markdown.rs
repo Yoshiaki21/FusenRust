@@ -90,6 +90,67 @@ pub fn remove_reference(content: &str, id: Uuid) -> String {
     out
 }
 
+/// 一覧などに出す付箋の名前の最大の長さ（文字数）
+const DISPLAY_TITLE_CHARS: usize = 80;
+/// タイトルも本文もないときの名前
+pub const EMPTY_NOTE_TITLE: &str = "（空の付箋）";
+
+/// 一覧などに出す付箋の名前: タイトルがあればタイトル、なければ本文の最初の空でない行
+/// （見出し・リスト・引用・チェックボックスの記号と、リンク・画像の書式を落とす）。どちらも空なら「（空の付箋）」
+pub fn display_title(title: &str, content: &str) -> String {
+    let t = title.trim();
+    let t = if t.is_empty() {
+        content
+            .lines()
+            .map(plain_line)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+    } else {
+        t.to_string()
+    };
+    if t.is_empty() {
+        EMPTY_NOTE_TITLE.to_string()
+    } else {
+        t.chars().take(DISPLAY_TITLE_CHARS).collect()
+    }
+}
+
+/// Markdown の 1 行から、名前として出すための文字だけを取り出す
+fn plain_line(line: &str) -> String {
+    // 見出し・リスト・引用・チェックボックスの記号を外す（各段階で前の空白も落とす）
+    let t = line.trim();
+    let t = t.trim_start_matches('#').trim_start();
+    let t = t.trim_start_matches(['-', '*', '>', '+']).trim_start();
+    let t = t
+        .strip_prefix("[ ]")
+        .or_else(|| t.strip_prefix("[x]"))
+        .or_else(|| t.strip_prefix("[X]"))
+        .unwrap_or(t)
+        .trim();
+    strip_links(t).trim().to_string()
+}
+
+/// `![説明](url)` / `[文字](url)` を「説明」「文字」にする
+fn strip_links(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        let Some(close_rel) = rest[open..].find("](") else {
+            break;
+        };
+        let close = open + close_rel;
+        let Some(end_rel) = rest[close + 2..].find(')') else {
+            break;
+        };
+        let before = &rest[..open];
+        out.push_str(before.strip_suffix('!').unwrap_or(before));
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[close + 2 + end_rel + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +205,19 @@ mod tests {
         let removed = remove_reference(&s, m.attachment_id);
         assert_eq!(removed.trim_end(), "本文");
         assert!(extract_attachment_refs(&removed).is_empty());
+    }
+
+    #[test]
+    fn display_title_prefers_title_then_first_line() {
+        assert_eq!(display_title(" 買い物 ", "# 見出し"), "買い物");
+        assert_eq!(display_title("", "\n\n# 見出し\n本文"), "見出し");
+        assert_eq!(display_title("", "- [ ] 牛乳を買う"), "牛乳を買う");
+        assert_eq!(display_title("", "> 引用"), "引用");
+        assert_eq!(
+            display_title("", "![地図](attachment://x) と [資料](https://e.x/a)"),
+            "地図 と 資料"
+        );
+        assert_eq!(display_title("  ", "  \n "), EMPTY_NOTE_TITLE);
+        assert_eq!(display_title(&"あ".repeat(100), "").chars().count(), 80);
     }
 }

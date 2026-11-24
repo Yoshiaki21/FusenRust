@@ -207,6 +207,16 @@ async fn two_clients_sync() {
     sync::sync_once(&a, &ta).await.unwrap();
     assert_eq!(a.note(r.note_id).unwrap().content, "B が更新");
     assert_eq!(a.history(r.note_id).unwrap(), b.history(r.note_id).unwrap());
+
+    // タイトルもサーバーを通して届く
+    a.set_title(r.note_id, "買い物リスト").unwrap();
+    sync::sync_once(&a, &ta).await.unwrap();
+    sync::sync_once(&b, &tb).await.unwrap();
+    let nb = b.note(r.note_id).unwrap();
+    assert_eq!(nb.title, "買い物リスト");
+    assert_eq!(nb.content, "B が更新", "タイトルの変更で本文は変わらない");
+    let h = b.history(r.note_id).unwrap();
+    assert_eq!(h.last().unwrap().kind, RevisionKind::Title);
 }
 
 #[tokio::test]
@@ -505,6 +515,7 @@ fn push_req(attachments: Vec<Uuid>) -> PushRevisionRequest {
         device_id: Uuid::now_v7(),
         edited_at: chrono::Utc::now(),
         kind: RevisionKind::Edit,
+        title: "題".into(),
         content: "本文".into(),
         color: "yellow".into(),
         attachments,

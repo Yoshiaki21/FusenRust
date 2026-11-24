@@ -57,6 +57,61 @@ fn color_change_creates_color_revision() {
 }
 
 #[test]
+fn title_creates_title_revision_and_is_kept_by_other_changes() {
+    let (_d, s) = open();
+    let id = s.create_note("本文", color::YELLOW).unwrap().note_id;
+    assert_eq!(s.note(id).unwrap().title, "");
+    assert_eq!(s.note(id).unwrap().display_title(), "本文");
+
+    let r = s.set_title(id, "  買い物\nリスト ").unwrap().unwrap();
+    assert_eq!(r.kind, RevisionKind::Title);
+    assert_eq!(r.title, "買い物 リスト", "改行は空白にして前後の空白を除く");
+    assert!(
+        s.set_title(id, "買い物 リスト").unwrap().is_none(),
+        "同じなら版を作らない"
+    );
+
+    // 本文・色の変更ではタイトルは変わらない
+    s.save_edit(id, "新しい本文", None, None).unwrap();
+    s.set_color(id, color::BLUE).unwrap();
+    let n = s.note(id).unwrap();
+    assert_eq!(
+        (n.title.as_str(), n.content.as_str()),
+        ("買い物 リスト", "新しい本文")
+    );
+    assert_eq!(n.display_title(), "買い物 リスト");
+
+    // タイトルで検索できる
+    assert_eq!(s.search("リスト").unwrap().len(), 1);
+
+    // 空にするとタイトルを外す（表示は本文の 1 行目）
+    s.set_title(id, "").unwrap().unwrap();
+    assert_eq!(s.note(id).unwrap().display_title(), "新しい本文");
+
+    // 過去の版に戻すとタイトルも戻る
+    s.revert(id, r.rev).unwrap();
+    assert_eq!(s.note(id).unwrap().title, "買い物 リスト");
+}
+
+#[test]
+fn own_changes_during_edit_do_not_count_as_conflict_base() {
+    let (_d, s) = open();
+    let r1 = s.create_note("本文", color::YELLOW).unwrap();
+    // 編集を始めた（土台は r1）後に、同じ端末でタイトルを変えた
+    let t = s.set_title(r1.note_id, "題").unwrap().unwrap();
+    let e = s
+        .save_edit(r1.note_id, "編集した本文", None, Some(r1.rev))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        e.base_rev,
+        Some(t.rev),
+        "自分の変更しかないので最新の版を土台にする"
+    );
+    assert_eq!(e.title, "題", "編集の保存でタイトルが消えない");
+}
+
+#[test]
 fn trash_and_restore() {
     let (_d, s) = open();
     let a = s.create_note("A", color::YELLOW).unwrap().note_id;
