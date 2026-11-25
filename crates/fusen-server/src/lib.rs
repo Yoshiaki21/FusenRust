@@ -109,17 +109,28 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // 管理画面（設定したときだけ。同期の API とは別のポート）
     let admin_task = match &config.admin {
-        None => None,
+        None => {
+            tracing::info!("管理画面は無効です（FUSEN_ADMIN_LISTEN が未設定）");
+            None
+        }
         Some(a) => {
             let admin_listener = tokio::net::TcpListener::bind(a.listen)
                 .await
                 .with_context(|| format!("管理画面を {} で待ち受けできません", a.listen))?;
             let admin_state = admin::AdminState::new(&state, config.data_dir.clone(), &a.password);
-            tracing::info!("管理画面を有効にしました: http://{}", a.listen);
+            let listen = a.listen;
+            // 使うときだけ有効にする運用なので、無効にし忘れに気づけるよう目立つ WARN で出す
+            tracing::warn!(
+                "管理画面が有効です: http://{listen}（使い終わったら FUSEN_ADMIN_LISTEN を外して起動し直してください）"
+            );
+            let reminder = tokio::spawn(admin_reminder(listen));
             Some(tokio::spawn(async move {
-                axum::serve(admin_listener, admin::router(admin_state))
+                let result = axum::serve(admin_listener, admin::router(admin_state))
                     .with_graceful_shutdown(shutdown_signal())
-                    .await
+                    .await;
+                reminder.abort();
+                tracing::info!("管理画面を停止しました: http://{listen}");
+                result
             }))
         }
     };
@@ -138,6 +149,19 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     }
     tracing::info!("fusen-server を終了しました");
     Ok(())
+}
+
+/// 管理画面が有効な間、1 時間ごとに「まだ有効です」とログに出す（無効にし忘れ対策。D-016）
+async fn admin_reminder(listen: SocketAddr) {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let mut hours = 0u64;
+    loop {
+        tokio::time::sleep(INTERVAL).await;
+        hours += 1;
+        tracing::warn!(
+            "管理画面が有効のままです: http://{listen}（有効にしてから {hours} 時間。使い終わったら無効にしてください）"
+        );
+    }
 }
 
 async fn shutdown_signal() {
