@@ -4,7 +4,9 @@
 //! - 端末ごとのトークンによる Bearer 認証（トークンはハッシュだけを保存）
 //! - API は `docs/spec.md` 6.3。型は `fusen-proto`
 //! - TLS はリバースプロキシ（Caddy）が担当し、このサーバーは HTTP で待ち受ける
+//! - 管理画面（[`admin`]）は設定したときだけ、別のポートで待ち受ける（D-016）
 
+pub mod admin;
 pub mod db;
 mod error;
 mod routes;
@@ -28,6 +30,8 @@ pub struct Config {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub max_upload_bytes: u64,
+    /// 管理画面（`None` なら起動しない）
+    pub admin: Option<admin::AdminConfig>,
 }
 
 /// 全リクエストで共有する状態
@@ -60,6 +64,23 @@ impl AppState {
     }
 }
 
+/// トークンを無効にし、その端末の票を待っていた完全削除を処理する（コマンドと管理画面から使う。D-014）。
+/// 無効にしたら `Some(完全に削除した付箋の数)`、当てはまる有効なトークンがなければ `None`
+pub fn revoke_and_purge(
+    db: &Db,
+    data_dir: &std::path::Path,
+    id_or_prefix: &str,
+) -> anyhow::Result<Option<usize>> {
+    if !db.with(|c| db::revoke_token(c, id_or_prefix))? {
+        return Ok(None);
+    }
+    let (count, unused) = db
+        .with(db::purge_ready_notes)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    remove_blobs(&data_dir.join("blobs"), &unused);
+    Ok(Some(count))
+}
+
 /// どこからも参照されなくなった blob のファイルを消す（完全削除の後。D-014）
 pub fn remove_blobs(blobs_dir: &std::path::Path, shas: &[String]) {
     for sha in shas.iter().filter(|s| is_valid_sha256(s)) {
@@ -85,6 +106,24 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("{} で待ち受けできません", config.listen))?;
+
+    // 管理画面（設定したときだけ。同期の API とは別のポート）
+    let admin_task = match &config.admin {
+        None => None,
+        Some(a) => {
+            let admin_listener = tokio::net::TcpListener::bind(a.listen)
+                .await
+                .with_context(|| format!("管理画面を {} で待ち受けできません", a.listen))?;
+            let admin_state = admin::AdminState::new(&state, config.data_dir.clone(), &a.password);
+            tracing::info!("管理画面を有効にしました: http://{}", a.listen);
+            Some(tokio::spawn(async move {
+                axum::serve(admin_listener, admin::router(admin_state))
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+            }))
+        }
+    };
+
     tracing::info!(
         "fusen-server を起動しました: http://{}（データ {:?}、アップロード上限 {} バイト）",
         config.listen,
@@ -94,6 +133,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    if let Some(task) = admin_task {
+        task.await??;
+    }
     tracing::info!("fusen-server を終了しました");
     Ok(())
 }

@@ -754,12 +754,23 @@ async fn revoking_last_token_completes_purge() {
     sync::sync_once(&a, &ta).await.unwrap();
     assert_eq!(srv.db.with(db::purge_ready_notes).unwrap().0, 0);
 
+    // 管理画面の待ち状況: A は削除済み、B 待ち
+    let waiting = srv.db.with(|c| db::purge_waiting(c)).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].title, "消す付箋");
+    assert_eq!(waiting[0].voted, ["a"]);
+    assert_eq!(waiting[0].waiting, ["b"]);
+    let usage = srv.db.with(|c| db::usage(c)).unwrap();
+    assert_eq!((usage.trashed, usage.blobs, usage.blob_bytes), (1, 1, 8));
+
     // B の PC を使わなくなったのでトークンを無効にする → A の票だけで削除される
     assert!(srv.db.with(|c| db::revoke_token(c, &b_id)).unwrap());
     let (count, unused) = srv.db.with(db::purge_ready_notes).unwrap();
     assert_eq!(count, 1);
     assert_eq!(unused.len(), 1);
     assert!(ta.get_note_history(id).await.unwrap().is_none());
+    assert!(srv.db.with(|c| db::purge_waiting(c)).unwrap().is_empty());
+    assert_eq!(srv.db.with(|c| db::usage(c)).unwrap().purged, 1);
 }
 
 #[tokio::test]

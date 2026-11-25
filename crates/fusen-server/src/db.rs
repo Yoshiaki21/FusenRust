@@ -685,6 +685,182 @@ pub fn verify_token(conn: &Connection, token: &str) -> Result<Option<AuthDevice>
 }
 
 // ----------------------------------------------------------------------
+// 管理画面（docs/decisions.md D-016）
+// ----------------------------------------------------------------------
+
+/// 管理画面に出すトークンの情報
+#[derive(Debug, Clone)]
+pub struct TokenDetail {
+    pub info: TokenInfo,
+    /// このトークンで受け付けた版の数
+    pub revisions: i64,
+}
+
+/// トークンの一覧（受け付けた版の数つき。発行順）
+pub fn token_details(conn: &Connection) -> Result<Vec<TokenDetail>, ApiError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.token_id, t.device_name, t.created_at, t.last_used_at, t.revoked_at,
+                (SELECT COUNT(*) FROM revisions r WHERE r.token_id = t.token_id)
+         FROM tokens t ORDER BY t.created_at",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(TokenDetail {
+                info: TokenInfo {
+                    token_id: r.get(0)?,
+                    device_name: r.get(1)?,
+                    created_at: r.get(2)?,
+                    last_used_at: r.get(3)?,
+                    revoked_at: r.get(4)?,
+                },
+                revisions: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// 端末名を変える。変えたら true
+pub fn rename_token(
+    conn: &Connection,
+    token_id: &str,
+    device_name: &str,
+) -> Result<bool, ApiError> {
+    Ok(conn.execute(
+        "UPDATE tokens SET device_name = ?1 WHERE token_id = ?2",
+        params![device_name, token_id],
+    )? == 1)
+}
+
+/// 無効にしたトークンを一覧から消す（有効なトークンは消さない）。消したら true。
+/// 版の `token_id` はそのまま残る（どのトークンで受け付けたかの記録）
+pub fn delete_revoked_token(conn: &mut Connection, token_id: &str) -> Result<bool, ApiError> {
+    let tx = conn.transaction()?;
+    let n = tx.execute(
+        "DELETE FROM tokens WHERE token_id = ?1 AND revoked_at IS NOT NULL",
+        [token_id],
+    )?;
+    if n == 1 {
+        tx.execute("DELETE FROM purge_votes WHERE token_id = ?1", [token_id])?;
+    }
+    tx.commit()?;
+    Ok(n == 1)
+}
+
+/// 完全削除の票を待っている付箋
+#[derive(Debug, Clone)]
+pub struct PurgeWaiting {
+    pub note_id: String,
+    /// 付箋の名前（タイトル、なければ本文の最初の行）
+    pub title: String,
+    /// 票を入れた端末名
+    pub voted: Vec<String>,
+    /// まだ票を入れていない有効な端末名
+    pub waiting: Vec<String>,
+}
+
+/// 完全削除の票が入っていて、まだ削除していない付箋の一覧
+pub fn purge_waiting(conn: &Connection) -> Result<Vec<PurgeWaiting>, ApiError> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT v.note_id FROM purge_votes v JOIN notes n ON n.note_id = v.note_id
+             WHERE n.deleted = 1 GROUP BY v.note_id ORDER BY MIN(v.voted_at)",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for id in ids {
+        let (title, content): (String, String) = conn.query_row(
+            "SELECT r.title, r.content FROM revisions r JOIN notes n
+               ON n.note_id = r.note_id AND n.latest_rev = r.rev WHERE r.note_id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let voted: Vec<String> = conn
+            .prepare(
+                "SELECT COALESCE(t.device_name, '（消したトークン）') FROM purge_votes v
+                 LEFT JOIN tokens t ON t.token_id = v.token_id
+                 WHERE v.note_id = ?1 ORDER BY v.voted_at",
+            )?
+            .query_map([&id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let waiting: Vec<String> = conn
+            .prepare(
+                "SELECT t.device_name FROM tokens t
+                 WHERE t.revoked_at IS NULL AND t.last_used_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM purge_votes v
+                                   WHERE v.note_id = ?1 AND v.token_id = t.token_id)
+                 ORDER BY t.created_at",
+            )?
+            .query_map([&id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push(PurgeWaiting {
+            note_id: id,
+            title: note_label(&title, &content),
+            voted,
+            waiting,
+        });
+    }
+    Ok(out)
+}
+
+/// 付箋の名前: タイトル、なければ本文の最初の空でない行（見出しなどの記号を落とし、60 文字まで）
+fn note_label(title: &str, content: &str) -> String {
+    let base = if !title.trim().is_empty() {
+        title.trim()
+    } else {
+        content
+            .lines()
+            .map(|l| {
+                l.trim()
+                    .trim_start_matches(['#', '-', '*', '>', ' '])
+                    .trim()
+            })
+            .find(|l| !l.is_empty())
+            .unwrap_or("（空の付箋）")
+    };
+    let mut label: String = base.chars().take(60).collect();
+    if base.chars().count() > 60 {
+        label.push('…');
+    }
+    label
+}
+
+/// サーバーの使用量
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub notes: i64,
+    pub trashed: i64,
+    pub revisions: i64,
+    pub attachments: i64,
+    /// 添付の実体（同じ中身は 1 つ）の数と合計サイズ
+    pub blobs: i64,
+    pub blob_bytes: i64,
+    pub purged: i64,
+    pub last_server_seq: i64,
+}
+
+pub fn usage(conn: &Connection) -> Result<Usage, ApiError> {
+    let count = |sql: &str| -> Result<i64, ApiError> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let (blobs, blob_bytes): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(size), 0)
+         FROM (SELECT sha256, MAX(size) AS size FROM attachments GROUP BY sha256)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(Usage {
+        notes: count("SELECT COUNT(*) FROM notes WHERE deleted = 0")?,
+        trashed: count("SELECT COUNT(*) FROM notes WHERE deleted = 1")?,
+        revisions: count("SELECT COUNT(*) FROM revisions")?,
+        attachments: count("SELECT COUNT(*) FROM attachments")?,
+        blobs,
+        blob_bytes,
+        purged: count("SELECT COUNT(*) FROM purged_notes")?,
+        last_server_seq: last_server_seq(conn)?,
+    })
+}
+
+// ----------------------------------------------------------------------
 // 行の変換
 // ----------------------------------------------------------------------
 

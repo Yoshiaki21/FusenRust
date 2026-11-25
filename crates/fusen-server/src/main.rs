@@ -5,12 +5,14 @@
 //!   fusen-server token list                         トークンの一覧
 //!   fusen-server token revoke <ID>                  トークンを無効にする（ID の先頭だけでもよい）
 //!
-//! 設定は環境変数（または同名の引数）: FUSEN_LISTEN, FUSEN_DATA_DIR, FUSEN_MAX_UPLOAD_BYTES
+//! 設定は環境変数（または同名の引数）: FUSEN_LISTEN, FUSEN_DATA_DIR, FUSEN_MAX_UPLOAD_BYTES,
+//! FUSEN_ADMIN_LISTEN（設定したときだけ管理画面を起動）, FUSEN_ADMIN_PASSWORD
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use fusen_server::admin::AdminConfig;
 use fusen_server::{Config, DEFAULT_MAX_UPLOAD_BYTES, Db, db};
 
 #[derive(Parser)]
@@ -30,6 +32,17 @@ struct Cli {
     /// 1 つの blob のアップロード上限（バイト）
     #[arg(long, env = "FUSEN_MAX_UPLOAD_BYTES", default_value_t = DEFAULT_MAX_UPLOAD_BYTES, global = true)]
     max_upload_bytes: u64,
+    /// 管理画面を待ち受けるアドレス（例 0.0.0.0:9010）。空なら管理画面は起動しない
+    #[arg(long, env = "FUSEN_ADMIN_LISTEN", global = true)]
+    admin_listen: Option<String>,
+    /// 管理画面のパスワード（管理画面を有効にするときは必須。8 文字以上）
+    #[arg(
+        long,
+        env = "FUSEN_ADMIN_PASSWORD",
+        hide_env_values = true,
+        global = true
+    )]
+    admin_password: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -77,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
                 listen: cli.listen,
                 data_dir: cli.data_dir,
                 max_upload_bytes: cli.max_upload_bytes,
+                admin: AdminConfig::from_values(
+                    cli.admin_listen.as_deref(),
+                    cli.admin_password.as_deref(),
+                )?,
             })
             .await
         }
@@ -116,18 +133,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 TokenCommand::Revoke { id } => {
-                    if db.with(|c| db::revoke_token(c, &id))? {
-                        println!("トークン {id} を無効にしました");
-                        // この端末の票を待っていた付箋は、ここで完全に削除される（D-014）
-                        let (count, unused) = db
-                            .with(db::purge_ready_notes)
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        fusen_server::remove_blobs(&cli.data_dir.join("blobs"), &unused);
-                        if count > 0 {
-                            println!("全端末で削除済みになった付箋 {count} 件を完全に削除しました");
+                    match fusen_server::revoke_and_purge(&db, &cli.data_dir, &id)? {
+                        Some(count) => {
+                            println!("トークン {id} を無効にしました");
+                            // この端末の票を待っていた付箋は、ここで完全に削除される（D-014）
+                            if count > 0 {
+                                println!(
+                                    "全端末で削除済みになった付箋 {count} 件を完全に削除しました"
+                                );
+                            }
                         }
-                    } else {
-                        anyhow::bail!("有効なトークン {id} が見つかりません");
+                        None => anyhow::bail!("有効なトークン {id} が見つかりません"),
                     }
                 }
             }
