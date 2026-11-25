@@ -130,6 +130,11 @@ pub fn apply_settings(cx: &mut App) {
     app.sync.reconfigure(server_config(&app.settings));
 }
 
+/// すぐ同期する（未送信の版や完全削除の票を送る）
+pub fn kick_sync(cx: &App) {
+    cx.global::<FusenApp>().sync.kick();
+}
+
 pub fn sync_status(cx: &App) -> SyncStatus {
     cx.global::<FusenApp>().sync_status.clone()
 }
@@ -166,8 +171,17 @@ fn on_remote_changes(cx: &mut App, changed: Vec<Uuid>, new: Vec<Uuid>) {
         }
     }
     for id in ids {
-        let Some(note) = log_err(store.note(id)) else {
-            continue;
+        let note = match store.note(id) {
+            Ok(n) => n,
+            // サーバーで完全に削除済みだったので、この端末からも消した（D-014）
+            Err(fusen_core::CoreError::NoteNotFound(_)) => {
+                close_note_window(cx, id);
+                continue;
+            }
+            Err(e) => {
+                tracing::error!("付箋を読めません: {e}");
+                continue;
+            }
         };
         let is_open = cx.global::<FusenApp>().notes.contains_key(&id);
         if note.deleted {

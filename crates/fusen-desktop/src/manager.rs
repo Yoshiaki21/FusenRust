@@ -1,14 +1,14 @@
 //! 管理画面（`docs/spec.md` 5.3）。通常のウィンドウ 1 つにタブで並べる。
 //!
 //! - 一覧: 全付箋（タイトル（なければ本文の 1 行目）・色・更新日時・更新した端末・この端末に貼ってあるか）。検索。クリックでデスクトップに表示して前面に出す
-//! - ごみ箱: 削除した付箋と復元
+//! - ごみ箱: 削除した付箋と復元・完全に削除（D-014）
 //! - 履歴: 選んだ付箋の版を時系列で表示し、「この版に戻す」で revert 版を作る
 //! - 設定: サーバー URL・トークン・端末名、フォント、添付の上限、自動起動
 
 use fusen_core::{NoteSnapshot, Revision, RevisionKind};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -178,6 +178,85 @@ impl ManagerWindow {
             app::open_note(cx, id, None);
             app::notes_changed(cx, id);
         });
+    }
+
+    /// 完全に削除する前に確認する（D-014）
+    fn confirm_purge(&mut self, ids: Vec<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let synced = app::server_config(app::settings(cx)).is_some();
+        let title = if ids.len() == 1 {
+            "付箋を完全に削除しますか？".to_string()
+        } else {
+            format!("ごみ箱の付箋 {} 件を完全に削除しますか？", ids.len())
+        };
+        let mut desc = "この端末から履歴・添付ごと削除します。元に戻せません。".to_string();
+        if synced {
+            desc.push_str(
+                "\n他の端末ではごみ箱に残ります。すべての端末で完全に削除すると、サーバーからも削除されます。",
+            );
+        }
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            let ids = ids.clone();
+            alert
+                .title(title.clone())
+                .description(desc.clone())
+                .confirm()
+                .ok_text("完全に削除")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let ids = ids.clone();
+                    let _ = this.update(cx, |m, cx| m.purge(ids, window, cx));
+                    true
+                })
+        });
+    }
+
+    fn purge(&mut self, ids: Vec<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        let store = app::store(cx);
+        // サーバーと同期していない端末では、未送信の版があっても消してよい
+        let allow_unsent = app::server_config(app::settings(cx)).is_none();
+        let (mut done, mut unsent) = (0, 0);
+        for id in ids {
+            match store.purge(id, allow_unsent) {
+                Ok(()) => {
+                    done += 1;
+                    if self.history_note.as_ref().is_some_and(|n| n.note_id == id) {
+                        self.history_note = None;
+                        self.selected_rev = None;
+                    }
+                    cx.defer(move |cx| app::close_note_window(cx, id));
+                }
+                Err(fusen_core::CoreError::UnsentRevisions(_)) => unsent += 1,
+                Err(e) => {
+                    tracing::error!("完全に削除できません: {e}");
+                    window.push_notification(
+                        Notification::error(format!("完全に削除できません: {e}")),
+                        cx,
+                    );
+                }
+            }
+        }
+        if done > 0 {
+            window.push_notification(
+                Notification::success(format!("{done} 件を完全に削除しました")),
+                cx,
+            );
+            // 削除の票をサーバーに送る
+            app::kick_sync(cx);
+        }
+        if unsent > 0 {
+            window.push_notification(
+                Notification::warning(format!(
+                    "{unsent} 件はサーバーに送っていない変更があるため、削除しませんでした。同期が終わってから削除してください"
+                )),
+                cx,
+            );
+        }
+        self.refresh(cx);
     }
 
     fn revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -367,6 +446,15 @@ impl ManagerWindow {
                         .label("復元")
                         .on_click(cx.listener(move |this, _, _, cx| this.restore(id, cx))),
                 )
+                .child(
+                    Button::new(("purge", i))
+                        .small()
+                        .danger()
+                        .label("完全に削除")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_purge(vec![id], window, cx)
+                        })),
+                )
             })
             .into_any_element()
     }
@@ -420,12 +508,29 @@ impl ManagerWindow {
             .enumerate()
             .map(|(i, n)| self.render_note_row(i, n, true, cx))
             .collect();
-        div()
-            .id("trash")
+        let all: Vec<Uuid> = self.trash.iter().map(|n| n.note_id).collect();
+        v_flex()
             .size_full()
-            .overflow_y_scroll()
-            .when(rows.is_empty(), |d| d.child(empty("ごみ箱は空です")))
-            .children(rows)
+            .child(
+                h_flex().p_2().justify_end().child(
+                    Button::new("empty-trash")
+                        .danger()
+                        .label("ごみ箱を空にする")
+                        .disabled(all.is_empty())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_purge(all.clone(), window, cx)
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .id("trash")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(rows.is_empty(), |d| d.child(empty("ごみ箱は空です")))
+                    .children(rows),
+            )
             .into_any_element()
     }
 

@@ -327,6 +327,8 @@ impl Worker {
         for id in report.pulled.changed_notes {
             changed.push(id);
         }
+        // サーバーで完全に削除済みだったので消した付箋（ウィンドウを閉じる）
+        changed.extend(report.pushed.gone);
         changed.sort();
         changed.dedup();
         if !changed.is_empty() || !report.pulled.new_notes.is_empty() {

@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use fusen_core::sync::Transport;
 use fusen_core::{AttachmentMeta, CoreError, Result};
-use fusen_proto::{API_PREFIX, ChangesResponse, PushRevisionRequest, PushRevisionResponse};
+use fusen_proto::{
+    API_PREFIX, ChangesResponse, NoteHistoryResponse, PurgeResponse, PushRevisionRequest,
+    PushRevisionResponse,
+};
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
@@ -122,6 +125,10 @@ impl Transport for HttpTransport {
             .send()
             .await
             .map_err(terr)?;
+        // 完全に削除された付箋（D-014）
+        if resp.status() == reqwest::StatusCode::GONE {
+            return Err(CoreError::NoteGone(note_id));
+        }
         check(resp).await?.json().await.map_err(terr)
     }
 
@@ -176,6 +183,27 @@ impl Transport for HttpTransport {
         }
         file.sync_all().await?;
         Ok(())
+    }
+
+    async fn get_note_history(&self, note_id: Uuid) -> Result<Option<NoteHistoryResponse>> {
+        let resp = self
+            .req(reqwest::Method::GET, &format!("/notes/{note_id}/revisions"))
+            .send()
+            .await
+            .map_err(terr)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check(resp).await?.json().await.map(Some).map_err(terr)
+    }
+
+    async fn purge_note(&self, note_id: Uuid) -> Result<PurgeResponse> {
+        let resp = self
+            .req(reqwest::Method::POST, &format!("/notes/{note_id}/purge"))
+            .send()
+            .await
+            .map_err(terr)?;
+        check(resp).await?.json().await.map_err(terr)
     }
 }
 
