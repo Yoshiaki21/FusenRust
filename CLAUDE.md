@@ -48,14 +48,14 @@
 | gpui-kit の rev・共通の依存を変える | `Cargo.toml`（workspace.dependencies） |
 | API の型（版・添付・差分・WebSocket） | `crates/fusen-proto/src/lib.rs` |
 | 端末側 DB のスキーマ・マイグレーション | `crates/fusen-core/src/db.rs`（追加は MIGRATIONS の末尾に足すだけ） |
-| 付箋・版・ごみ箱・revert・下書き・配置・同期の記録 | `crates/fusen-core/src/store.rs`（`Store`） |
+| 付箋・版・ごみ箱・revert・下書き・配置・同期の記録・完全削除と墓標 | `crates/fusen-core/src/store.rs`（`Store`。完全削除は `purge`。D-014） |
 | 添付の実体（SHA-256・重複排除・上限） | `crates/fusen-core/src/blob.rs` |
 | `attachment://` 参照の抽出・作成、一覧に出す付箋の名前（`display_title`） | `crates/fusen-core/src/markdown.rs` |
 | 同期エンジン・通信のトレイト | `crates/fusen-core/src/sync.rs`（`Transport`） |
 | 付箋の色のキー | `crates/fusen-core/src/color.rs`（表示色は desktop の `palette.rs`） |
 | core のテスト（仮サーバーでの同期を含む） | `crates/fusen-core/tests/` |
 | サーバーの API（ルーティング・認証・blob・WebSocket） | `crates/fusen-server/src/routes.rs` |
-| サーバーの DB（版の受け付け・競合・冪等・トークン） | `crates/fusen-server/src/db.rs` |
+| サーバーの DB（版の受け付け・競合・冪等・トークン・完全削除の票） | `crates/fusen-server/src/db.rs` |
 | サーバーの起動・設定・トークン管理コマンド | `crates/fusen-server/src/lib.rs`, `src/main.rs` |
 | サーバーの結合テスト（テスト用の HTTP の Transport を含む） | `crates/fusen-server/tests/api.rs` |
 | コンテナのイメージ | `deploy/Containerfile`（ビルド時はメンバーを proto/core/server に絞る） |
@@ -65,7 +65,7 @@
 | デスクトップの起動・引数・単一インスタンス | `crates/fusen-desktop/src/main.rs` |
 | アプリ全体の状態・命令・付箋ウィンドウの開閉・位置の保存と復元・同期イベントの反映 | `crates/fusen-desktop/src/app.rs` |
 | 付箋ウィンドウ（バー・本文・編集・添付チップ・貼り付け・他端末更新の表示） | `crates/fusen-desktop/src/note_window.rs` |
-| 管理画面（一覧・ごみ箱・履歴・設定・同期状態） | `crates/fusen-desktop/src/manager.rs` |
+| 管理画面（一覧・ごみ箱と完全削除・履歴・設定・同期状態） | `crates/fusen-desktop/src/manager.rs` |
 | 設定・保存場所・既定サイズ・プロファイル | `crates/fusen-desktop/src/settings.rs` |
 | 付箋の表示色 | `crates/fusen-desktop/src/palette.rs` |
 | 画像のデコードとキャッシュ | `crates/fusen-desktop/src/images.rs` |
@@ -91,6 +91,7 @@
 - fusen-proto / fusen-core に gpui・OS 固有の依存を入れない（Android 版で UniFFI から使うため）
 - 版は追記のみ。UPDATE は仮番号→確定番号の置き換え（`store.rs` の `confirm`）だけ。未同期の版は負の仮番号（D-004）
 - 同じ版の再送は op_id（UUIDv7）で冪等にする。版を後から指すときも番号ではなく op_id で覚える（番号は同期で変わる。D-004, D-010）
+- 完全削除は端末ごと。墓標を残してサーバーに票を送り、有効なトークン全部の票がそろったらサーバーからも消す。行を DELETE するのはこの完全削除だけ（D-014）
 - 付箋を貼るかどうかは端末ごと。配置（placements、同期しない）がない付箋はこの端末には貼っていない。他の端末の付箋を自動で貼らない（D-012）
 - 版に項目を足すときは、proto に `#[serde(default)]`、端末とサーバーの両方の DB にマイグレーションを足す（D-013 の title が例）
 - ビューの更新中からアプリ全体の処理（`app::notes_changed` など）を呼ぶときは `cx.defer` を通す（同じエンティティの二重借用を避けるため）
@@ -131,6 +132,7 @@ podman exec fusen-server fusen-server token create --device <端末名>
 - Windows: gpui は `start_window_move` / `start_window_resize` が未実装。バーは `window_control_area(Drag)`、右下のつまみはサブクラスの `WM_NCHITTEST`（D-011）
 - Windows: PowerShell 5.1 用の .ps1 に日本語を書くときは UTF-8（BOM 付き）で保存する（BOM なしだと壊れて読まれる）
 - コンテナのビルドは `.dockerignore` / `.containerignore` で target/ を除く（target は数十 GB になる）
+- 完全削除: 使わなくなった PC のトークンを `token revoke` しないと、サーバーからは消えない（その PC の票を待ち続ける。D-014）
 - サーバーのコンテナは uid 10001 で動く。本番の bind mount のデータディレクトリは事前に chown が必要
 
 ### 7. 変更履歴（任意）
