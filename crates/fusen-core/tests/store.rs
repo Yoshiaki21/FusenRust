@@ -409,3 +409,74 @@ fn unknown_note_is_an_error() {
     assert!(matches!(s.history(id), Err(CoreError::NoteNotFound(_))));
     assert!(matches!(s.trash(id), Err(CoreError::NoteNotFound(_))));
 }
+
+// ----------------------------------------------------------------------
+// 完全削除（D-014）
+// ----------------------------------------------------------------------
+
+#[test]
+fn purge_only_notes_in_trash() {
+    let (_d, s) = open();
+    let id = s.create_note("消す", color::YELLOW).unwrap().note_id;
+    assert!(matches!(s.purge(id, true), Err(CoreError::NotInTrash(_))));
+    s.trash(id).unwrap();
+    // 同期している端末では、ごみ箱へ移した版を送るまで消さない
+    assert!(matches!(
+        s.purge(id, false),
+        Err(CoreError::UnsentRevisions(_))
+    ));
+    assert!(s.note(id).is_ok());
+}
+
+#[test]
+fn purge_removes_rows_and_unused_blobs() {
+    let (_d, s) = open();
+    let id = s.create_note("消す", color::YELLOW).unwrap().note_id;
+    let own = s
+        .import_attachment_bytes(id, "own.png", b"only-here", 1024)
+        .unwrap();
+    let shared = s
+        .import_attachment_bytes(id, "shared.png", b"shared-bytes", 1024)
+        .unwrap();
+    s.add_attachment(id, own.attachment_id, None).unwrap();
+    s.add_attachment(id, shared.attachment_id, None).unwrap();
+    s.save_draft(id, "下書き").unwrap();
+    s.ensure_placement(id, 200.0, 200.0).unwrap();
+
+    // 同じ中身の添付を持つ別の付箋
+    let other = s.create_note("残す", color::YELLOW).unwrap().note_id;
+    let o = s
+        .import_attachment_bytes(other, "copy.png", b"shared-bytes", 1024)
+        .unwrap();
+    s.add_attachment(other, o.attachment_id, None).unwrap();
+
+    s.trash(id).unwrap();
+    s.purge(id, true).unwrap();
+
+    assert!(matches!(s.note(id), Err(CoreError::NoteNotFound(_))));
+    assert!(s.list_trash().unwrap().is_empty());
+    assert!(s.drafts().unwrap().is_empty());
+    assert!(s.placement(id).unwrap().is_none());
+    assert!(
+        s.pending_revisions()
+            .unwrap()
+            .iter()
+            .all(|r| r.note_id != id)
+    );
+    assert!(matches!(
+        s.attachment(own.attachment_id),
+        Err(CoreError::AttachmentNotFound(_))
+    ));
+    assert!(!s.blobs().contains(&own.sha256), "参照のない実体は消す");
+    assert!(
+        s.blobs().contains(&shared.sha256),
+        "他の付箋が使う実体は残す"
+    );
+    assert!(s.blob_path(o.attachment_id).unwrap().is_some());
+    assert!(s.is_purged(id).unwrap());
+    assert_eq!(s.unreported_purges().unwrap(), vec![id]);
+    s.mark_purge_reported(id).unwrap();
+    assert!(s.unreported_purges().unwrap().is_empty());
+    // 他の付箋はそのまま
+    assert_eq!(s.note(other).unwrap().content, "残す");
+}

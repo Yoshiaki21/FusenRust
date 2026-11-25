@@ -11,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use fusen_proto::{
-    API_PREFIX, AttachmentMeta, ChangesQuery, ChangesResponse, PushRevisionRequest,
-    PushRevisionResponse, Revision, WsMessage,
+    API_PREFIX, AttachmentMeta, ChangesQuery, ChangesResponse, NoteHistoryResponse, PurgeResponse,
+    PushRevisionRequest, PushRevisionResponse, WsMessage,
 };
 use futures_util::StreamExt as _;
 use sha2::{Digest, Sha256};
@@ -37,6 +37,7 @@ pub fn router(state: AppState) -> Router {
             "/notes/{note_id}/revisions",
             get(get_revisions).post(push_revision),
         )
+        .route("/notes/{note_id}/purge", post(purge_note))
         .route("/attachments", post(register_attachment))
         .route("/ws", get(websocket))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
@@ -111,11 +112,33 @@ async fn get_changes(
 async fn get_revisions(
     State(st): State<AppState>,
     Path(note_id): Path<String>,
-) -> Result<Json<Vec<Revision>>, ApiError> {
+) -> Result<Json<NoteHistoryResponse>, ApiError> {
     let note_id = parse_uuid(&note_id)?;
     Ok(Json(
-        st.db.call(move |c| db::note_revisions(c, note_id)).await?,
+        st.db.call(move |c| db::note_history(c, note_id)).await?,
     ))
+}
+
+/// 端末で完全に削除した票（docs/decisions.md D-014）
+async fn purge_note(
+    State(st): State<AppState>,
+    Extension(device): Extension<AuthDevice>,
+    Path(note_id): Path<String>,
+) -> Result<Json<PurgeResponse>, ApiError> {
+    let note_id = parse_uuid(&note_id)?;
+    let token_id = device.token_id.clone();
+    let (resp, unused) = st
+        .db
+        .call(move |c| db::vote_purge(c, note_id, &token_id))
+        .await?;
+    tracing::info!(
+        "完全削除の票: 付箋 {note_id} 端末 {} → {:?}（残り {}）",
+        device.device_name,
+        resp.state,
+        resp.remaining
+    );
+    crate::remove_blobs(&st.blobs_dir, &unused);
+    Ok(Json(resp))
 }
 
 async fn push_revision(

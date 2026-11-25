@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use fusen_proto::{ChangesResponse, PushRevisionResponse};
+use fusen_proto::{ChangesResponse, NoteHistoryResponse, PushRevisionResponse};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use uuid::Uuid;
@@ -697,6 +697,170 @@ impl Store {
     }
 
     // ------------------------------------------------------------------
+    // 完全削除（docs/decisions.md D-014）
+    // ------------------------------------------------------------------
+
+    /// ごみ箱の付箋を、この端末から完全に削除する。
+    ///
+    /// 版・添付のメタデータ・下書き・配置を消し、どの添付からも参照されなくなった実体（blob）も消す。
+    /// 墓標を残し、次の同期でサーバーに削除の票を送る（有効な全端末が削除するとサーバーからも消える）。
+    ///
+    /// `allow_unsent` が false なら、未送信の版がある付箋は削除しない
+    /// （ごみ箱へ移した版がサーバーに届く前に消すと、他の端末ではごみ箱に入らないままになるため）。
+    /// サーバーと同期していない端末では true にする。
+    pub fn purge(&self, note_id: Uuid, allow_unsent: bool) -> Result<()> {
+        let unused = {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            let head = snapshot(&tx, note_id)?;
+            if !head.deleted {
+                return Err(CoreError::NotInTrash(note_id));
+            }
+            if !allow_unsent && has_unsent(&tx, note_id)? {
+                return Err(CoreError::UnsentRevisions(note_id));
+            }
+            let max_seq = max_server_seq(&tx, note_id)?;
+            let unused = delete_note_rows(&tx, note_id)?;
+            tx.execute(
+                "INSERT INTO purged_notes (note_id, purged_at, reported, revived, max_seq)
+                 VALUES (?1, ?2, 0, 0, ?3)
+                 ON CONFLICT(note_id) DO UPDATE SET
+                   purged_at = excluded.purged_at, reported = 0, revived = 0,
+                   max_seq = excluded.max_seq",
+                params![note_id.to_string(), fmt_time(Utc::now()), max_seq],
+            )?;
+            tx.commit()?;
+            unused
+        };
+        self.remove_blobs(&unused);
+        tracing::info!("付箋を完全に削除しました: {note_id}");
+        Ok(())
+    }
+
+    /// サーバーで完全に削除済みの付箋を、この端末からも消す（未送信の版があっても消す。票は送らない）
+    pub(crate) fn purge_gone(&self, note_id: Uuid) -> Result<()> {
+        let unused = {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            let max_seq = max_server_seq(&tx, note_id)?;
+            let unused = delete_note_rows(&tx, note_id)?;
+            tx.execute(
+                "INSERT INTO purged_notes (note_id, purged_at, reported, revived, max_seq)
+                 VALUES (?1, ?2, 1, 0, ?3)
+                 ON CONFLICT(note_id) DO UPDATE SET reported = 1, revived = 0,
+                   max_seq = excluded.max_seq",
+                params![note_id.to_string(), fmt_time(Utc::now()), max_seq],
+            )?;
+            tx.commit()?;
+            unused
+        };
+        self.remove_blobs(&unused);
+        tracing::info!("サーバーで完全に削除された付箋を消しました: {note_id}");
+        Ok(())
+    }
+
+    fn remove_blobs(&self, shas: &[String]) {
+        for sha in shas {
+            if let Err(e) = self.blobs.remove(sha) {
+                tracing::warn!("添付の実体を消せません（{sha}）: {e}");
+            }
+        }
+    }
+
+    /// この端末で完全に削除した付箋か（他の端末で復元されて取り込み直したものは除く）
+    pub fn is_purged(&self, note_id: Uuid) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM purged_notes WHERE note_id = ?1 AND revived = 0)",
+            [note_id.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// サーバーにまだ削除の票を送っていない付箋
+    pub fn unreported_purges(&self) -> Result<Vec<Uuid>> {
+        self.purged_where("reported = 0 AND revived = 0")
+    }
+
+    /// 削除の票を送り終えた
+    pub fn mark_purge_reported(&self, note_id: Uuid) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE purged_notes SET reported = 1 WHERE note_id = ?1",
+            [note_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// 完全に削除した後で他の端末で復元され、全履歴をサーバーから取り直す必要がある付箋
+    pub fn revived_notes(&self) -> Result<Vec<Uuid>> {
+        self.purged_where("revived = 1")
+    }
+
+    fn purged_where(&self, cond: &str) -> Result<Vec<Uuid>> {
+        let conn = self.lock();
+        let ids: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT note_id FROM purged_notes WHERE {cond} ORDER BY purged_at"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.iter().map(|s| parse_uuid_str(s)).collect()
+    }
+
+    /// 復元された付箋の全履歴（`GET /notes/{id}/revisions` の応答）を取り込み、墓標を消す。
+    /// `history` が `None`（サーバーにもない）なら、取り込み済みの版のまま墓標だけ消す。
+    pub fn import_history(
+        &self,
+        note_id: Uuid,
+        history: Option<&NoteHistoryResponse>,
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if let Some(h) = history {
+            for meta in &h.attachments {
+                insert_attachment(&tx, meta)?;
+            }
+            for r in h.revisions.iter().filter(|r| r.note_id == note_id) {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM revisions
+                     WHERE op_id = ?1 OR (note_id = ?2 AND rev = ?3))",
+                    params![r.op_id.to_string(), note_id.to_string(), r.rev],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    insert_revision(&tx, r)?;
+                }
+            }
+            if let Some(first) = h
+                .revisions
+                .iter()
+                .filter(|r| r.note_id == note_id)
+                .min_by_key(|r| r.rev)
+            {
+                tx.execute(
+                    "INSERT INTO notes (note_id, latest_rev, deleted, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(note_id) DO UPDATE SET created_at = excluded.created_at",
+                    params![
+                        note_id.to_string(),
+                        first.rev,
+                        first.deleted,
+                        fmt_time(first.edited_at)
+                    ],
+                )?;
+            }
+            recompute_note(&tx, note_id)?;
+        }
+        tx.execute(
+            "DELETE FROM purged_notes WHERE note_id = ?1",
+            [note_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // 同期（sync モジュールから使う）
     // ------------------------------------------------------------------
 
@@ -757,6 +921,16 @@ impl Store {
     pub fn mark_blob_sent(&self, sha256: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM blob_outbox WHERE sha256 = ?1", [sha256])?;
+        Ok(())
+    }
+
+    /// blob を未送信に戻す（サーバーから消えていたとき。次の同期で送り直す）
+    pub fn mark_blob_pending(&self, sha256: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO blob_outbox (sha256) VALUES (?1)",
+            [sha256],
+        )?;
         Ok(())
     }
 
@@ -833,6 +1007,39 @@ impl Store {
                     continue;
                 }
                 None => {}
+            }
+
+            // この端末で完全に削除した付箋（D-014）
+            let tomb: Option<(bool, i64)> = tx
+                .query_row(
+                    "SELECT revived, max_seq FROM purged_notes WHERE note_id = ?1",
+                    [r.note_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((false, max_seq)) = tomb {
+                if seq <= max_seq {
+                    // 削除した時点で持っていた版（自分が送った版が差分で戻ってきたなど）
+                    continue;
+                }
+                if r.deleted {
+                    // ごみ箱にあるままの版（他の端末が同時にごみ箱へ入れたなど）は取り込まない。
+                    // サーバーは新しい版で票を消すので、票を送り直す
+                    tx.execute(
+                        "UPDATE purged_notes SET reported = 0 WHERE note_id = ?1",
+                        [r.note_id.to_string()],
+                    )?;
+                    continue;
+                }
+                // 他の端末で復元された: 取り込み直し、全履歴は同期の後で取り直す
+                tx.execute(
+                    "UPDATE purged_notes SET revived = 1 WHERE note_id = ?1",
+                    [r.note_id.to_string()],
+                )?;
+                tracing::info!(
+                    "完全に削除した付箋が他の端末で復元されました: {}",
+                    r.note_id
+                );
             }
 
             let inserted = tx.execute(
@@ -918,6 +1125,73 @@ fn changed_by_others_since(
     };
     let me = me.to_string();
     Ok(rows[pos + 1..].iter().any(|(_, device)| *device != me))
+}
+
+/// 付箋の版の最大の受付番号（なければ 0）
+fn max_server_seq(conn: &Connection, note_id: Uuid) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(server_seq), 0) FROM revisions WHERE note_id = ?1",
+        [note_id.to_string()],
+        |r| r.get(0),
+    )?)
+}
+
+/// 付箋に未送信の版があるか
+fn has_unsent(conn: &Connection, note_id: Uuid) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM outbox WHERE note_id = ?1)",
+        [note_id.to_string()],
+        |r| r.get(0),
+    )?)
+}
+
+/// 付箋の行（版・添付のメタデータ・下書き・配置・outbox）を消し、
+/// どの添付からも参照されなくなった blob の sha256 を返す（ファイルは呼び出し側が消す）。
+///
+/// 添付は別の付箋の版から参照されることがある（メタデータの note_id は最初に添付した付箋）ので、
+/// 他の付箋の版が参照している添付は残す。
+fn delete_note_rows(tx: &Transaction<'_>, note_id: Uuid) -> Result<Vec<String>> {
+    let id = note_id.to_string();
+    let targets: Vec<(String, String)> = tx
+        .prepare(
+            "SELECT attachment_id, sha256 FROM attachments
+             WHERE (note_id = ?1 OR attachment_id IN
+                     (SELECT j.value FROM revisions r, json_each(r.attachments) j WHERE r.note_id = ?1))
+               AND attachment_id NOT IN
+                     (SELECT j.value FROM revisions r, json_each(r.attachments) j WHERE r.note_id <> ?1)",
+        )?
+        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut shas: Vec<String> = Vec::new();
+    for (attachment_id, sha) in targets {
+        tx.execute(
+            "DELETE FROM attachments WHERE attachment_id = ?1",
+            [&attachment_id],
+        )?;
+        tx.execute(
+            "DELETE FROM attachment_outbox WHERE attachment_id = ?1",
+            [&attachment_id],
+        )?;
+        if !shas.contains(&sha) {
+            shas.push(sha);
+        }
+    }
+    for table in ["revisions", "outbox", "drafts", "placements", "notes"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE note_id = ?1"), [&id])?;
+    }
+    let mut unused = Vec::new();
+    for sha in shas {
+        let used: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE sha256 = ?1)",
+            [&sha],
+            |r| r.get(0),
+        )?;
+        if !used {
+            tx.execute("DELETE FROM blob_outbox WHERE sha256 = ?1", [&sha])?;
+            unused.push(sha);
+        }
+    }
+    Ok(unused)
 }
 
 /// 仮番号で版を追加し、outbox に入れて、付箋の最新の状態を更新する

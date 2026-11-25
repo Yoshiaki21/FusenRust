@@ -202,6 +202,34 @@ pub struct ChangesQuery {
     pub limit: Option<u32>,
 }
 
+/// `GET /notes/{note_id}/revisions` の応答（付箋の全版と、それらが参照する添付のメタデータ）
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteHistoryResponse {
+    /// 版番号の順
+    pub revisions: Vec<Revision>,
+    pub attachments: Vec<AttachmentMeta>,
+}
+
+/// 完全削除の票の状態（docs/decisions.md D-014）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurgeState {
+    /// 票を記録した。まだ削除していない端末がある
+    Waiting,
+    /// サーバーからも削除した（または、もともとサーバーにない）
+    Purged,
+    /// サーバーではごみ箱に入っていない（他の端末で復元された）。票は記録しない
+    NotDeleted,
+}
+
+/// `POST /notes/{note_id}/purge` の応答
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeResponse {
+    pub state: PurgeState,
+    /// まだ削除していない端末（有効なトークン）の数
+    pub remaining: u32,
+}
+
 /// WebSocket でサーバーから送るメッセージ
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

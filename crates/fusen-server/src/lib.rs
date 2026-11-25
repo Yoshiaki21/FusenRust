@@ -60,6 +60,18 @@ impl AppState {
     }
 }
 
+/// どこからも参照されなくなった blob のファイルを消す（完全削除の後。D-014）
+pub fn remove_blobs(blobs_dir: &std::path::Path, shas: &[String]) {
+    for sha in shas.iter().filter(|s| is_valid_sha256(s)) {
+        let path = blobs_dir.join(&sha[..2]).join(sha);
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!("添付の実体を消しました: {sha}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("添付の実体を消せません（{sha}）: {e}"),
+        }
+    }
+}
+
 /// SHA-256 の 16 進表記（小文字 64 文字）か
 pub fn is_valid_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))

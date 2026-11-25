@@ -19,6 +19,9 @@ pub enum ApiError {
     PayloadTooLarge(u64),
     #[error("{0}")]
     UnprocessableEntity(String),
+    /// 完全に削除された付箋（docs/decisions.md D-014）
+    #[error("{0}")]
+    Gone(String),
     #[error("サーバー内部のエラー: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -44,6 +47,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::Gone(_) => StatusCode::GONE,
             ApiError::Internal(e) => {
                 tracing::error!("{e:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

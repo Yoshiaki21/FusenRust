@@ -118,6 +118,14 @@ async fn main() -> anyhow::Result<()> {
                 TokenCommand::Revoke { id } => {
                     if db.with(|c| db::revoke_token(c, &id))? {
                         println!("トークン {id} を無効にしました");
+                        // この端末の票を待っていた付箋は、ここで完全に削除される（D-014）
+                        let (count, unused) = db
+                            .with(db::purge_ready_notes)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        fusen_server::remove_blobs(&cli.data_dir.join("blobs"), &unused);
+                        if count > 0 {
+                            println!("全端末で削除済みになった付箋 {count} 件を完全に削除しました");
+                        }
                     } else {
                         anyhow::bail!("有効なトークン {id} が見つかりません");
                     }

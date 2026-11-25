@@ -40,4 +40,16 @@ pub enum CoreError {
 
     #[error("通信エラー: {0}")]
     Transport(String),
+
+    #[error("ごみ箱にない付箋は完全に削除できません: {0}")]
+    NotInTrash(Uuid),
+
+    #[error(
+        "サーバーに送っていない変更があるため、まだ完全に削除できません（同期が終わってから削除してください）: {0}"
+    )]
+    UnsentRevisions(Uuid),
+
+    /// サーバーで完全に削除された付箋に版を送った（Transport が 410 Gone をこれで返す）
+    #[error("サーバーで完全に削除された付箋です: {0}")]
+    NoteGone(Uuid),
 }

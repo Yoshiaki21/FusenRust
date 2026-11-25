@@ -1,14 +1,17 @@
 //! 同期エンジンのテスト。仮のサーバー（メモリ上）を 2 つの端末で共有して確かめる:
-//! 同期・オフライン中の編集の後送り・競合の印・仮番号の確定・冪等な再送・添付の送受信
+//! 同期・オフライン中の編集の後送り・競合の印・仮番号の確定・冪等な再送・添付の送受信・完全削除（D-014）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
 use fusen_core::blob::sha256_hex;
 use fusen_core::sync::{self, Transport};
 use fusen_core::{AttachmentMeta, CoreError, Result, Revision, Store, color};
-use fusen_proto::{ChangesResponse, PushRevisionRequest, PushRevisionResponse};
+use fusen_proto::{
+    ChangesResponse, NoteHistoryResponse, PurgeResponse, PurgeState, PushRevisionRequest,
+    PushRevisionResponse,
+};
 use futures_lite::future::block_on;
 use uuid::Uuid;
 
@@ -28,6 +31,12 @@ struct ServerState {
     attachments: HashMap<Uuid, AttachmentMeta>,
     /// 次の版の受け付け後に応答を失う（送信成功後に端末が落ちた想定）
     lose_next_response: bool,
+    /// 完全削除に必要な票の数（有効なトークンの数の代わり）
+    voters: usize,
+    /// 完全削除の票（付箋 → 端末）
+    votes: HashMap<Uuid, HashSet<u32>>,
+    /// 完全に削除した付箋
+    purged: HashSet<Uuid>,
 }
 
 impl FakeServer {
@@ -47,12 +56,22 @@ impl FakeServer {
     fn has_blob_bytes(&self, sha: &str) -> bool {
         self.state.lock().unwrap().blobs.contains_key(sha)
     }
+    fn with_voters(voters: usize) -> Self {
+        let s = Self::default();
+        s.state.lock().unwrap().voters = voters;
+        s
+    }
+    fn note_revision_count(&self, note_id: Uuid) -> usize {
+        let st = self.state.lock().unwrap();
+        st.revisions.iter().filter(|r| r.note_id == note_id).count()
+    }
 }
 
-/// 端末からの接続。`offline` ならすべて通信エラーにする。
+/// 端末からの接続。`offline` ならすべて通信エラーにする。`id` はトークンの代わり（完全削除の票）
 struct Client<'a> {
     server: &'a FakeServer,
     offline: bool,
+    id: u32,
 }
 
 impl Client<'_> {
@@ -102,6 +121,10 @@ impl Transport for Client<'_> {
         if let Some(resp) = st.ops.get(&req.op_id) {
             return Ok(*resp);
         }
+        if st.purged.contains(&note_id) {
+            return Err(CoreError::NoteGone(note_id));
+        }
+        st.votes.remove(&note_id);
         // blob・メタデータがない版は受け付けない
         for id in &req.attachments {
             let Some(meta) = st.attachments.get(id) else {
@@ -194,6 +217,65 @@ impl Transport for Client<'_> {
         std::fs::write(dest, bytes)?;
         Ok(())
     }
+
+    async fn get_note_history(&self, note_id: Uuid) -> Result<Option<NoteHistoryResponse>> {
+        self.check()?;
+        let st = self.server.state.lock().unwrap();
+        let mut revisions: Vec<Revision> = st
+            .revisions
+            .iter()
+            .filter(|r| r.note_id == note_id)
+            .cloned()
+            .collect();
+        if revisions.is_empty() {
+            return Ok(None);
+        }
+        revisions.sort_by_key(|r| r.rev);
+        let attachments = revisions
+            .iter()
+            .flat_map(|r| r.attachments.iter())
+            .filter_map(|id| st.attachments.get(id).cloned())
+            .collect();
+        Ok(Some(NoteHistoryResponse {
+            revisions,
+            attachments,
+        }))
+    }
+
+    async fn purge_note(&self, note_id: Uuid) -> Result<PurgeResponse> {
+        self.check()?;
+        let mut st = self.server.state.lock().unwrap();
+        let done = |state| PurgeResponse {
+            state,
+            remaining: 0,
+        };
+        let head = st
+            .revisions
+            .iter()
+            .filter(|r| r.note_id == note_id)
+            .max_by_key(|r| r.server_seq)
+            .map(|r| r.deleted);
+        match head {
+            None => Ok(done(PurgeState::Purged)),
+            Some(false) => Ok(done(PurgeState::NotDeleted)),
+            Some(true) => {
+                let voters = st.voters;
+                let votes = st.votes.entry(note_id).or_default();
+                votes.insert(self.id);
+                let remaining = voters.saturating_sub(votes.len()) as u32;
+                if remaining > 0 {
+                    return Ok(PurgeResponse {
+                        state: PurgeState::Waiting,
+                        remaining,
+                    });
+                }
+                st.revisions.retain(|r| r.note_id != note_id);
+                st.votes.remove(&note_id);
+                st.purged.insert(note_id);
+                Ok(done(PurgeState::Purged))
+            }
+        }
+    }
 }
 
 fn device() -> (tempfile::TempDir, Store) {
@@ -203,9 +285,14 @@ fn device() -> (tempfile::TempDir, Store) {
 }
 
 fn online(server: &FakeServer) -> Client<'_> {
+    online_as(server, 0)
+}
+
+fn online_as(server: &FakeServer, id: u32) -> Client<'_> {
     Client {
         server,
         offline: false,
+        id,
     }
 }
 
@@ -213,6 +300,7 @@ fn offline(server: &FakeServer) -> Client<'_> {
     Client {
         server,
         offline: true,
+        id: 0,
     }
 }
 
@@ -590,4 +678,136 @@ fn rev_of_op_follows_renumbering() {
         "古い仮番号を送らないので競合にならない"
     );
     assert_eq!(a.rev_of_op(r.note_id, uuid::Uuid::now_v7()).unwrap(), None);
+}
+
+// ----------------------------------------------------------------------
+// 完全削除（D-014）
+// ----------------------------------------------------------------------
+
+/// A・B の 2 台で付箋を作ってごみ箱に入れ、両方が取り込んだ状態にする
+fn trashed_on_both(server: &FakeServer, a: &Store, b: &Store) -> Uuid {
+    let id = a.create_note("一", color::YELLOW).unwrap().note_id;
+    a.save_edit(id, "二", None, None).unwrap();
+    block_on(sync::sync_once(a, &online_as(server, 1))).unwrap();
+    block_on(sync::sync_once(b, &online_as(server, 2))).unwrap();
+    a.trash(id).unwrap();
+    block_on(sync::sync_once(a, &online_as(server, 1))).unwrap();
+    block_on(sync::sync_once(b, &online_as(server, 2))).unwrap();
+    assert!(b.note(id).unwrap().deleted);
+    id
+}
+
+#[test]
+fn purge_on_all_devices_removes_from_server() {
+    let server = FakeServer::with_voters(2);
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let id = trashed_on_both(&server, &a, &b);
+
+    a.purge(id, false).unwrap();
+    let rep = block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+    assert_eq!(rep.purges.len(), 1);
+    assert_eq!(rep.purges[0].1.state, PurgeState::Waiting);
+    assert_eq!(rep.purges[0].1.remaining, 1);
+    assert!(a.unreported_purges().unwrap().is_empty());
+    assert!(
+        matches!(a.note(id), Err(CoreError::NoteNotFound(_))),
+        "自分が送った版（ごみ箱へ移した版）が差分で戻ってきても取り込み直さない"
+    );
+    assert_eq!(
+        server.note_revision_count(id),
+        3,
+        "B がまだ持っているので残る"
+    );
+
+    // 票は 1 度だけ送る
+    let rep = block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+    assert!(rep.purges.is_empty());
+
+    b.purge(id, false).unwrap();
+    let rep = block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+    assert_eq!(rep.purges[0].1.state, PurgeState::Purged);
+    assert_eq!(server.note_revision_count(id), 0);
+}
+
+#[test]
+fn restored_on_other_device_after_purge_is_revived_with_full_history() {
+    let server = FakeServer::with_voters(2);
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let id = trashed_on_both(&server, &a, &b);
+
+    a.purge(id, false).unwrap();
+    block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+
+    // B はごみ箱から戻した
+    b.restore(id).unwrap();
+    block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+
+    let rep = block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+    assert!(rep.pulled.changed_notes.contains(&id));
+    let n = a.note(id).unwrap();
+    assert!(!n.deleted);
+    assert_eq!(n.content, "二");
+    let revs: Vec<_> = a.history(id).unwrap().iter().map(|r| r.rev).collect();
+    assert_eq!(revs, vec![1, 2, 3, 4], "全履歴を取り直す");
+    assert!(!a.is_purged(id).unwrap());
+    assert!(a.revived_notes().unwrap().is_empty());
+    assert!(a.placement(id).unwrap().is_none(), "この端末には貼らない");
+
+    // 戻された後は、A の票は数えない（B が消しても消えない）
+    b.trash(id).unwrap();
+    block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+    b.purge(id, false).unwrap();
+    let rep = block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+    assert_eq!(rep.purges[0].1.state, PurgeState::Waiting);
+}
+
+#[test]
+fn change_in_trash_after_purge_is_not_imported_but_voted_again() {
+    let server = FakeServer::with_voters(2);
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let id = trashed_on_both(&server, &a, &b);
+
+    a.purge(id, false).unwrap();
+    block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+
+    // B がごみ箱の中の付箋の色を変えた（ごみ箱にあるままの版）。サーバーは A の票を消す
+    b.set_color(id, color::PINK).unwrap();
+    block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+
+    // A は取り込まず、票を送り直す
+    let rep = block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+    assert!(matches!(a.note(id), Err(CoreError::NoteNotFound(_))));
+    assert_eq!(rep.purges.len(), 1);
+    assert_eq!(rep.purges[0].1.state, PurgeState::Waiting);
+
+    b.purge(id, false).unwrap();
+    let rep = block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+    assert_eq!(rep.purges[0].1.state, PurgeState::Purged);
+}
+
+#[test]
+fn push_to_note_purged_on_server_removes_it_locally() {
+    let server = FakeServer::with_voters(2);
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let (_dc, c) = device();
+    let id = trashed_on_both(&server, &a, &b);
+    block_on(sync::sync_once(&c, &online_as(&server, 1))).unwrap();
+
+    // C はオフライン中にごみ箱から戻した（同じトークンを 2 台で使っていた想定）
+    c.restore(id).unwrap();
+
+    a.purge(id, false).unwrap();
+    block_on(sync::sync_once(&a, &online_as(&server, 1))).unwrap();
+    b.purge(id, false).unwrap();
+    block_on(sync::sync_once(&b, &online_as(&server, 2))).unwrap();
+
+    let rep = block_on(sync::sync_once(&c, &online_as(&server, 1))).unwrap();
+    assert_eq!(rep.pushed.gone, vec![id]);
+    assert!(matches!(c.note(id), Err(CoreError::NoteNotFound(_))));
+    assert_eq!(c.outbox_len().unwrap(), 0);
+    assert!(c.unreported_purges().unwrap().is_empty(), "票は送らない");
 }

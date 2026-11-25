@@ -7,6 +7,7 @@
 //! - 不正なトークンの拒否
 //! - blob のハッシュ不一致の拒否
 //! - ほか: 冪等な再送、上限超過（413）、blob のない版の拒否、WebSocket の通知
+//! - 完全削除（D-014）: 全トークンの票で削除・無効にしたトークンは数えない・新しい版で票を数え直す・410
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,7 +15,8 @@ use std::time::Duration;
 use fusen_core::sync::{self, Transport};
 use fusen_core::{AttachmentMeta, CoreError, Result as CoreResult, Store, color};
 use fusen_proto::{
-    ChangesResponse, PushRevisionRequest, PushRevisionResponse, RevisionKind, WsMessage,
+    ChangesResponse, NoteHistoryResponse, PurgeResponse, PurgeState, PushRevisionRequest,
+    PushRevisionResponse, RevisionKind, WsMessage,
 };
 use fusen_server::{AppState, Db, db, router};
 use futures_util::StreamExt as _;
@@ -48,6 +50,19 @@ impl TestServer {
 
     fn token(&self, device: &str) -> String {
         self.db.with(|c| db::create_token(c, device)).unwrap().1
+    }
+
+    fn token_with_id(&self, device: &str) -> (String, String) {
+        self.db.with(|c| db::create_token(c, device)).unwrap()
+    }
+
+    fn blob_exists(&self, sha256: &str) -> bool {
+        self._dir
+            .path()
+            .join("blobs")
+            .join(&sha256[..2])
+            .join(sha256)
+            .is_file()
     }
 }
 
@@ -120,6 +135,9 @@ impl Transport for Http {
             .send()
             .await
             .map_err(terr)?;
+        if resp.status() == reqwest::StatusCode::GONE {
+            return Err(CoreError::NoteGone(note_id));
+        }
         check(resp).await?.json().await.map_err(terr)
     }
 
@@ -166,6 +184,27 @@ impl Transport for Http {
         let bytes = check(resp).await?.bytes().await.map_err(terr)?;
         tokio::fs::write(dest, &bytes).await?;
         Ok(())
+    }
+
+    async fn get_note_history(&self, note_id: Uuid) -> CoreResult<Option<NoteHistoryResponse>> {
+        let resp = self
+            .req(reqwest::Method::GET, &format!("/notes/{note_id}/revisions"))
+            .send()
+            .await
+            .map_err(terr)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check(resp).await?.json().await.map(Some).map_err(terr)
+    }
+
+    async fn purge_note(&self, note_id: Uuid) -> CoreResult<PurgeResponse> {
+        let resp = self
+            .req(reqwest::Method::POST, &format!("/notes/{note_id}/purge"))
+            .send()
+            .await
+            .map_err(terr)?;
+        check(resp).await?.json().await.map_err(terr)
     }
 }
 
@@ -275,19 +314,9 @@ async fn concurrent_edits_get_conflict_flag() {
     assert_eq!(contents, ["元", "A の編集", "B の編集"]);
 
     // サーバーの全版の API でも確かめる
-    let all: Vec<fusen_proto::Revision> = ta
-        .req(
-            reqwest::Method::GET,
-            &format!("/notes/{}/revisions", r.note_id),
-        )
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let all = ta.get_note_history(r.note_id).await.unwrap().unwrap();
     assert_eq!(
-        all.iter().map(|r| r.conflict).collect::<Vec<_>>(),
+        all.revisions.iter().map(|r| r.conflict).collect::<Vec<_>>(),
         [false, false, true]
     );
 }
@@ -635,4 +664,135 @@ async fn websocket_notifies_changes() {
             server_seq: resp.server_seq
         }
     );
+}
+
+// ----------------------------------------------------------------------
+// 完全削除（D-014）
+// ----------------------------------------------------------------------
+
+/// 添付付きの付箋を A で作ってごみ箱に入れ、A・B の両方が取り込んだ状態にする。(付箋, 添付の sha256)
+async fn trashed_note(a: &Store, ta: &Http, b: &Store, tb: &Http) -> (Uuid, String) {
+    let id = a.create_note("消す付箋", color::YELLOW).unwrap().note_id;
+    let m = a
+        .import_attachment_bytes(id, "x.png", b"purge-me", 1024)
+        .unwrap();
+    a.add_attachment(id, m.attachment_id, None).unwrap();
+    a.trash(id).unwrap();
+    sync::sync_once(a, ta).await.unwrap();
+    sync::sync_once(b, tb).await.unwrap();
+    assert!(b.note(id).unwrap().deleted);
+    (id, m.sha256)
+}
+
+#[tokio::test]
+async fn purge_after_all_tokens_voted() {
+    let srv = TestServer::start(1024 * 1024).await;
+    let ta = Http::new(&srv.base, &srv.token("a"));
+    let tb = Http::new(&srv.base, &srv.token("b"));
+    // 一度も使っていないトークンは数えない
+    let _unused = srv.token("never-used");
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let (id, sha) = trashed_note(&a, &ta, &b, &tb).await;
+
+    a.purge(id, false).unwrap();
+    let rep = sync::sync_once(&a, &ta).await.unwrap();
+    assert_eq!(
+        rep.purges[0].1,
+        PurgeResponse {
+            state: PurgeState::Waiting,
+            remaining: 1
+        }
+    );
+    assert!(ta.get_note_history(id).await.unwrap().is_some());
+    assert!(srv.blob_exists(&sha));
+
+    b.purge(id, false).unwrap();
+    let rep = sync::sync_once(&b, &tb).await.unwrap();
+    assert_eq!(rep.purges[0].1.state, PurgeState::Purged);
+    assert!(ta.get_note_history(id).await.unwrap().is_none());
+    assert!(!srv.blob_exists(&sha), "参照されなくなった実体も消す");
+
+    // 新しく同期を始めた端末には届かない
+    let (_dc, c) = device();
+    let tc = Http::new(&srv.base, &srv.token("c"));
+    sync::sync_once(&c, &tc).await.unwrap();
+    assert!(c.list_trash().unwrap().is_empty());
+
+    // 削除済みの付箋への版は 410
+    let req = PushRevisionRequest {
+        op_id: Uuid::now_v7(),
+        device_id: Uuid::now_v7(),
+        edited_at: chrono::Utc::now(),
+        kind: RevisionKind::Restore,
+        title: String::new(),
+        content: "戻す".into(),
+        color: color::YELLOW.into(),
+        attachments: vec![],
+        deleted: false,
+        base_rev: None,
+    };
+    assert!(matches!(
+        tc.push_revision(id, &req).await,
+        Err(CoreError::NoteGone(_))
+    ));
+    // 票をもう一度送っても成功扱い
+    assert_eq!(tc.purge_note(id).await.unwrap().state, PurgeState::Purged);
+}
+
+#[tokio::test]
+async fn revoking_last_token_completes_purge() {
+    let srv = TestServer::start(1024 * 1024).await;
+    let ta = Http::new(&srv.base, &srv.token("a"));
+    let (b_id, b_token) = srv.token_with_id("b");
+    let tb = Http::new(&srv.base, &b_token);
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let (id, _) = trashed_note(&a, &ta, &b, &tb).await;
+
+    a.purge(id, false).unwrap();
+    sync::sync_once(&a, &ta).await.unwrap();
+    assert_eq!(srv.db.with(db::purge_ready_notes).unwrap().0, 0);
+
+    // B の PC を使わなくなったのでトークンを無効にする → A の票だけで削除される
+    assert!(srv.db.with(|c| db::revoke_token(c, &b_id)).unwrap());
+    let (count, unused) = srv.db.with(db::purge_ready_notes).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(unused.len(), 1);
+    assert!(ta.get_note_history(id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn new_revision_resets_votes() {
+    let srv = TestServer::start(1024 * 1024).await;
+    let ta = Http::new(&srv.base, &srv.token("a"));
+    let tb = Http::new(&srv.base, &srv.token("b"));
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let (id, _) = trashed_note(&a, &ta, &b, &tb).await;
+
+    a.purge(id, false).unwrap();
+    sync::sync_once(&a, &ta).await.unwrap();
+
+    // B が戻した → サーバーではごみ箱にないので、B の票は記録しない
+    b.restore(id).unwrap();
+    sync::sync_once(&b, &tb).await.unwrap();
+    assert_eq!(
+        tb.purge_note(id).await.unwrap().state,
+        PurgeState::NotDeleted
+    );
+
+    // A は取り込み直す（全履歴と添付も）
+    sync::sync_once(&a, &ta).await.unwrap();
+    let n = a.note(id).unwrap();
+    assert!(!n.deleted);
+    assert_eq!(a.history(id).unwrap().len(), 4);
+    assert_eq!(a.attachments_of(&n).unwrap().len(), 1);
+
+    // 再びごみ箱へ。B だけが消しても、A の古い票は数えない
+    b.trash(id).unwrap();
+    sync::sync_once(&b, &tb).await.unwrap();
+    b.purge(id, false).unwrap();
+    let rep = sync::sync_once(&b, &tb).await.unwrap();
+    assert_eq!(rep.purges[0].1.state, PurgeState::Waiting);
 }

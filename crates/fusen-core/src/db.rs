@@ -88,6 +88,19 @@ CREATE TABLE sync_state (
     r#"
 ALTER TABLE revisions ADD COLUMN title TEXT NOT NULL DEFAULT '';
 "#,
+    // v3: 完全に削除した付箋の墓標（docs/decisions.md D-014。同期しない）
+    // reported: サーバーに削除の票を送ったか
+    // revived: 他の端末で復元されたので取り込み直した。全履歴をサーバーから取り直すまで残す
+    // max_seq: 削除した時点で持っていた版の最大の受付番号（これ以前の版が差分で届いても無視する）
+    r#"
+CREATE TABLE purged_notes (
+  note_id    TEXT PRIMARY KEY,
+  purged_at  TEXT NOT NULL,
+  reported   INTEGER NOT NULL DEFAULT 0,
+  revived    INTEGER NOT NULL DEFAULT 0,
+  max_seq    INTEGER NOT NULL DEFAULT 0
+);
+"#,
 ];
 
 /// 接続の初期設定とマイグレーションを行う。

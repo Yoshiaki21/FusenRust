@@ -60,6 +60,14 @@ impl BlobStore {
         self.path_for(sha256).map(|p| p.is_file()).unwrap_or(false)
     }
 
+    /// blob を消す（なければ何もしない）。どの添付からも参照されなくなったときだけ使う
+    pub fn remove(&self, sha256: &str) -> Result<()> {
+        match fs::remove_file(self.path_for(sha256)?) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
     /// ファイルを取り込む。上限を超えていれば読む前にエラーにする。
     pub fn import_file(&self, path: &Path, max_bytes: u64) -> Result<(String, u64)> {
         let size = fs::metadata(path)?.len();
