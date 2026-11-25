@@ -293,7 +293,7 @@ CREATE TABLE sync_state (
 | メソッド | パス | 内容 |
 |---|---|---|
 | GET | `/healthz` | 死活確認（認証不要） |
-| GET | `/changes?since=<server_seq>&limit=<n>` | 指定の受付番号より後の版・添付メタデータを返す |
+| GET | `/changes?since=<server_seq>&limit=<n>` | 指定の受付番号より後の版・添付メタデータと、配った最大の受付番号（`max_server_seq`）を返す |
 | POST | `/notes/{note_id}/revisions` | 版を送る（`base_rev` を含む）。確定した `rev`・`server_seq`・`conflict` を返す |
 | GET | `/notes/{note_id}/revisions` | その付箋の全版と、それらが参照する添付のメタデータ |
 | POST | `/notes/{note_id}/purge` | この端末で完全に削除した票。全トークンの票がそろえば削除する（D-014） |
@@ -307,6 +307,7 @@ CREATE TABLE sync_state (
 - 版を送る前に、その版が参照する添付の blob を送っておく（blob がない版は受け付けない）。
 - 上限を超える blob は 413 を返す。
 - 完全に削除した付箋への版は 410 Gone を返す。
+- 受付番号は版を消しても使い回さない（D-015）。端末は `max_server_seq` が取り込み済みの番号より小さければ 0 から取り直す。
 
 ### 6.4 同期の流れ（クライアント側）
 

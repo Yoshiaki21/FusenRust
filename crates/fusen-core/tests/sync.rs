@@ -37,6 +37,8 @@ struct ServerState {
     votes: HashMap<Uuid, HashSet<u32>>,
     /// 完全に削除した付箋
     purged: HashSet<Uuid>,
+    /// 差分の応答の max_server_seq を差し替える（巻き戻ったサーバーの代わり）
+    max_seq_override: Option<i64>,
 }
 
 impl FakeServer {
@@ -108,6 +110,7 @@ impl Transport for Client<'_> {
             attachments,
             last_server_seq: last,
             has_more,
+            max_server_seq: st.max_seq_override.or(Some(st.seq)),
         })
     }
 
@@ -810,4 +813,23 @@ fn push_to_note_purged_on_server_removes_it_locally() {
     assert!(matches!(c.note(id), Err(CoreError::NoteNotFound(_))));
     assert_eq!(c.outbox_len().unwrap(), 0);
     assert!(c.unreported_purges().unwrap().is_empty(), "票は送らない");
+}
+
+/// サーバーが巻き戻っていたら（配った最大の番号が端末の取り込み済みより小さい）、最初から取り直す（D-015）
+#[test]
+fn pull_restarts_when_server_seq_is_behind() {
+    let server = FakeServer::default();
+    let (_da, a) = device();
+    let (_db, b) = device();
+    let id = a.create_note("一", color::YELLOW).unwrap().note_id;
+    a.save_edit(id, "二", None, None).unwrap();
+    block_on(sync::sync_once(&a, &online(&server))).unwrap();
+    block_on(sync::sync_once(&b, &online(&server))).unwrap();
+    assert_eq!(b.last_server_seq().unwrap(), 2);
+
+    // 巻き戻ったサーバー: 配った最大の番号が 1 しかないと返す
+    server.state.lock().unwrap().max_seq_override = Some(1);
+    block_on(sync::sync_once(&b, &online(&server))).unwrap();
+    assert_eq!(b.history(id).unwrap().len(), 2, "取り直しても重複しない");
+    assert_eq!(b.last_server_seq().unwrap(), 2);
 }

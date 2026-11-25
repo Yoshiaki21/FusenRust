@@ -1,6 +1,7 @@
 //! サーバー側の SQLite。
 //!
 //! - 版は追記のみ。順序は受付番号 `server_seq`（全付箋で通し番号）で決める（後勝ち）
+//! - 受付番号は `meta.last_server_seq` で採番し、版を消しても使い回さない（D-015）
 //! - 受け取った版の `base_rev` が最新版と違えば `conflict = 1`（docs/spec.md 4.3）
 //! - 同じ `op_id` の版は 1 度だけ受け付け、2 回目以降は前回と同じ応答を返す（冪等。docs/decisions.md D-004）
 //! - トークンはハッシュ（SHA-256）だけを保存する
@@ -89,6 +90,16 @@ CREATE TABLE purged_notes (
   note_id   TEXT PRIMARY KEY,
   purged_at TEXT NOT NULL
 );
+"#,
+    // v4: 受付番号の採番（docs/decisions.md D-015）。MAX(server_seq) + 1 だと、完全削除で最大の番号の版を
+    // 消したときに配り済みの番号を使い回してしまうため
+    r#"
+CREATE TABLE meta (
+  key   TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+INSERT INTO meta (key, value)
+  SELECT 'last_server_seq', COALESCE(MAX(server_seq), 0) FROM revisions;
 "#,
 ];
 
@@ -240,10 +251,10 @@ pub fn push_revision(
     let rev = latest.unwrap_or(0) + 1;
     // 編集を始めたときの版が最新でなければ競合（後勝ちで受け付けるが印を付ける）
     let conflict = latest.is_some() && req.base_rev != latest;
-    let server_seq: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(server_seq), 0) + 1 FROM revisions",
-        [],
-        |r| r.get(0),
+    let server_seq = last_server_seq(&tx)? + 1;
+    tx.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'last_server_seq'",
+        [server_seq],
     )?;
     let edited_at = fmt_time(req.edited_at);
     tx.execute(
@@ -327,7 +338,17 @@ pub fn changes(conn: &Connection, since: i64, limit: u32) -> Result<ChangesRespo
         attachments,
         last_server_seq,
         has_more,
+        max_server_seq: Some(self::last_server_seq(conn)?),
     })
+}
+
+/// 今までに配った最大の受付番号
+fn last_server_seq(conn: &Connection) -> Result<i64, ApiError> {
+    Ok(conn.query_row(
+        "SELECT value FROM meta WHERE key = 'last_server_seq'",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// 付箋の全版（版番号の順）と、それらが参照する添付のメタデータ

@@ -193,6 +193,10 @@ pub struct ChangesResponse {
     pub last_server_seq: i64,
     /// まだ続きがあるか
     pub has_more: bool,
+    /// サーバーが今までに配った最大の受付番号（古いサーバーは送らない）。
+    /// 端末の取り込み済みの番号より小さければ、サーバーが巻き戻っているので最初から取り直す（D-015）
+    #[serde(default)]
+    pub max_server_seq: Option<i64>,
 }
 
 /// `GET /changes` のクエリ

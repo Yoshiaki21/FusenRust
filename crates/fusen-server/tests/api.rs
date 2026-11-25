@@ -796,3 +796,32 @@ async fn new_revision_resets_votes() {
     let rep = sync::sync_once(&b, &tb).await.unwrap();
     assert_eq!(rep.purges[0].1.state, PurgeState::Waiting);
 }
+
+/// 受付番号の最大の版を完全削除しても、番号を使い回さない（D-015。使い回すと端末が取りこぼす）
+#[tokio::test]
+async fn purge_does_not_reuse_server_seq() {
+    let srv = TestServer::start(1024 * 1024).await;
+    let ta = Http::new(&srv.base, &srv.token("a"));
+    let tb = Http::new(&srv.base, &srv.token("b"));
+    let (_da, a) = device();
+    let (_db, b) = device();
+
+    let keep = a.create_note("残す", color::YELLOW).unwrap().note_id;
+    sync::sync_once(&a, &ta).await.unwrap();
+    // 後から作った付箋（受付番号が最大）を両方で完全に削除する
+    let (gone, _) = trashed_note(&a, &ta, &b, &tb).await;
+    let before = b.last_server_seq().unwrap();
+    a.purge(gone, false).unwrap();
+    sync::sync_once(&a, &ta).await.unwrap();
+    b.purge(gone, false).unwrap();
+    sync::sync_once(&b, &tb).await.unwrap();
+    assert!(ta.get_note_history(gone).await.unwrap().is_none());
+
+    // その後の編集は、前より大きい番号で受け付けられ、相手に届く
+    a.save_edit(keep, "削除の後の編集", None, None).unwrap();
+    sync::sync_once(&a, &ta).await.unwrap();
+    let h = a.history(keep).unwrap();
+    assert!(h.last().unwrap().server_seq.unwrap() > before);
+    sync::sync_once(&b, &tb).await.unwrap();
+    assert_eq!(b.note(keep).unwrap().content, "削除の後の編集");
+}

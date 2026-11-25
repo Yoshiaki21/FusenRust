@@ -88,9 +88,25 @@ pub async fn pull<T: Transport>(store: &Store, transport: &T) -> Result<RemoteAp
         last_server_seq: store.last_server_seq()?,
         ..Default::default()
     };
+    let mut restarted = false;
     loop {
         let since = total.last_server_seq;
         let changes = transport.get_changes(since, CHANGES_PAGE_SIZE).await?;
+        // サーバーが配った番号が、取り込み済みの番号より小さい: サーバーが巻き戻っている
+        // （バックアップから戻した、など）。取りこぼさないよう最初から取り直す。
+        // 既に持っている版は op_id で重複しない（D-015）
+        if let Some(max) = changes.max_server_seq
+            && max < since
+            && !restarted
+        {
+            tracing::warn!(
+                "サーバーの受付番号（{max}）が取り込み済みの番号（{since}）より小さいので、最初から取り直します"
+            );
+            store.reset_last_server_seq()?;
+            total.last_server_seq = 0;
+            restarted = true;
+            continue;
+        }
         let report = store.apply_remote(&changes)?;
         for id in report.changed_notes {
             if !total.changed_notes.contains(&id) {

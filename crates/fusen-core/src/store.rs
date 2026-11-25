@@ -872,6 +872,12 @@ impl Store {
             .unwrap_or(0))
     }
 
+    /// 取り込み済みの受付番号を 0 に戻す（サーバーが巻き戻っていたとき、最初から取り直すため。D-015）
+    pub fn reset_last_server_seq(&self) -> Result<()> {
+        let conn = self.lock();
+        set_state(&conn, KEY_LAST_SERVER_SEQ, "0")
+    }
+
     /// 未送信の版の数（同期状態の表示用）
     pub fn outbox_len(&self) -> Result<usize> {
         let conn = self.lock();
