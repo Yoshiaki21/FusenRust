@@ -57,6 +57,7 @@
 | サーバーの API（ルーティング・認証・blob・WebSocket） | `crates/fusen-server/src/routes.rs` |
 | サーバーの DB（版の受け付け・競合・冪等・トークン・完全削除の票） | `crates/fusen-server/src/db.rs` |
 | サーバーの起動・設定・トークン管理コマンド | `crates/fusen-server/src/lib.rs`, `src/main.rs` |
+| サーバーの管理画面（設定したときだけ別ポート 9010。ログイン・トークン管理） | `crates/fusen-server/src/admin.rs`（テストは `tests/admin.rs`。D-016） |
 | サーバーの結合テスト（テスト用の HTTP の Transport を含む） | `crates/fusen-server/tests/api.rs` |
 | コンテナのイメージ | `deploy/Containerfile`（ビルド時はメンバーを proto/core/server に絞る） |
 | テスト用サーバー（podman Quadlet、127.0.0.1:9090） | `deploy/fusen-server.container` |
@@ -113,6 +114,8 @@ cargo run -p fusen-server -- --data-dir /tmp/fusen-data token create --device te
 podman build -f deploy/Containerfile -t localhost/fusen-server:latest .
 systemctl --user restart fusen-server
 podman exec fusen-server fusen-server token create --device <端末名>
+# 管理画面をローカルで試す（設定したときだけ起動。http://127.0.0.1:19010）
+FUSEN_ADMIN_LISTEN=127.0.0.1:19010 FUSEN_ADMIN_PASSWORD=<8文字以上> cargo run -p fusen-server -- --listen 127.0.0.1:19191 --data-dir /tmp/fusen-data
 ```
 
 ### 6. 既知の制約・注意点
@@ -133,6 +136,7 @@ podman exec fusen-server fusen-server token create --device <端末名>
 - Windows: gpui は `start_window_move` / `start_window_resize` が未実装。バーは `window_control_area(Drag)`、右下のつまみはサブクラスの `WM_NCHITTEST`（D-011）
 - Windows: PowerShell 5.1 用の .ps1 に日本語を書くときは UTF-8（BOM 付き）で保存する（BOM なしだと壊れて読まれる）
 - コンテナのビルドは `.dockerignore` / `.containerignore` で target/ を除く（target は数十 GB になる）
+- 管理画面はホストの 127.0.0.1 にだけ公開し、Caddy では中継しない。テスト環境の 8081 は使用中なので 9010（D-016）
 - 完全削除: 使わなくなった PC のトークンを `token revoke` しないと、サーバーからは消えない（その PC の票を待ち続ける。D-014）
 - サーバーのコンテナは uid 10001 で動く。本番の bind mount のデータディレクトリは事前に chown が必要
 

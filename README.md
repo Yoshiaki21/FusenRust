@@ -111,6 +111,8 @@ TLS は前に置くリバースプロキシ（Caddy など）に任せ、サー�
 | `FUSEN_LISTEN` | 待ち受けるアドレス | `0.0.0.0:8080` |
 | `FUSEN_DATA_DIR` | データのディレクトリ | `./data` |
 | `FUSEN_MAX_UPLOAD_BYTES` | 1 ファイルのアップロードの上限 | `524288000`（500 MB） |
+| `FUSEN_ADMIN_LISTEN` | 管理画面を待ち受けるアドレス（設定したときだけ起動。例 `0.0.0.0:9010`） | なし（無効） |
+| `FUSEN_ADMIN_PASSWORD` | 管理画面のパスワード（8 文字以上。管理画面を有効にするときは必須） | なし |
 
 トークンの管理:
 
@@ -119,6 +121,11 @@ fusen-server token create --device <端末名>
 fusen-server token list
 fusen-server token revoke <ID>
 ```
+
+管理画面（Web）でも、トークンの発行・無効化・端末名の変更・最終使用日時の確認、完全削除の待ち状況・使用量の確認ができます。
+常には要らないので、使うときだけ `FUSEN_ADMIN_LISTEN` と `FUSEN_ADMIN_PASSWORD` を設定して起動し直し、
+`http://127.0.0.1:9010` を開きます（ホストの 127.0.0.1 にだけ公開します。別の PC からは `ssh -L 9010:127.0.0.1:9010 <サーバー>`）。
+設定の例は `deploy/.env.example`（Docker）と `deploy/fusen-server.container`（podman）にあります。
 
 ### Docker（compose）で動かす
 

@@ -3,6 +3,7 @@
 # - TLS（HTTPS）は Caddy が自動で取得・更新する
 # - WebSocket（/api/v1/ws）は reverse_proxy がそのまま中継する（特別な設定は不要）
 # - アップロードの上限はサーバーの FUSEN_MAX_UPLOAD_BYTES（既定 500 MB）に合わせる
+# - 管理画面（ポート 9010）は中継しない（ホストの 127.0.0.1 から、または SSH のポート転送で使う）
 
 fusen.example.com {
 	# 添付のアップロード（PUT /api/v1/blobs/...）の上限。サーバー側と同じ値にする

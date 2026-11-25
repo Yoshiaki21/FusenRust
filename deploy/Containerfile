@@ -34,7 +34,8 @@ ENV FUSEN_LISTEN=0.0.0.0:8080 \
     RUST_LOG=info
 USER fusen
 VOLUME ["/data"]
-EXPOSE 8080
+# 8080: 同期の API、9010: 管理画面（FUSEN_ADMIN_LISTEN を設定したときだけ待ち受ける）
+EXPOSE 8080 9010
 # podman は OCI 形式では HEALTHCHECK を無視する（--format docker で有効）。Docker では有効
 HEALTHCHECK --interval=30s --timeout=3s CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
 ENTRYPOINT ["/usr/local/bin/fusen-server"]

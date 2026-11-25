@@ -12,6 +12,11 @@
 #        podman exec fusen-server fusen-server token create --device cachyos-main
 #   4. 動作確認
 #        curl http://127.0.0.1:9090/healthz
+#
+# 管理画面（トークンの発行・無効化など。使うときだけ。D-016）:
+#   ~/.config/containers/systemd/fusen-server.container の下の FUSEN_ADMIN_* の 2 行の # を外し、
+#   パスワード（8 文字以上）を書いて、systemctl --user daemon-reload && systemctl --user restart fusen-server
+#   → http://127.0.0.1:9010 。使い終わったら # を戻して、もう一度 daemon-reload と restart
 
 [Unit]
 Description=FusenRust 同期サーバー（テスト）
@@ -26,6 +31,10 @@ Volume=fusen-data:/data:Z
 PublishPort=127.0.0.1:9090:8080
 Environment=FUSEN_MAX_UPLOAD_BYTES=524288000
 Environment=RUST_LOG=info
+# 管理画面（コンテナの中は 0.0.0.0:9010、ホストは 127.0.0.1:9010 だけ）
+PublishPort=127.0.0.1:9010:9010
+#Environment=FUSEN_ADMIN_LISTEN=0.0.0.0:9010
+#Environment=FUSEN_ADMIN_PASSWORD=
 
 [Service]
 Restart=on-failure

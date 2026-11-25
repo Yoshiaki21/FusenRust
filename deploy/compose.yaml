@@ -12,6 +12,10 @@
 #   docker compose -f deploy/compose.yaml exec fusen-server fusen-server token list
 #   curl http://127.0.0.1:8080/healthz      # → ok（ポートは .env の FUSEN_PORT）
 #
+# ■ 管理画面（使うときだけ）
+#   .env の FUSEN_ADMIN_LISTEN / FUSEN_ADMIN_PASSWORD の # を外して up -d → http://127.0.0.1:9010
+#   別の PC からは ssh -L 9010:127.0.0.1:9010 <LXC>。使い終わったら # を戻して up -d
+#
 # ■ LXC の中でビルドしたくない場合（Rust のビルドには数 GB のメモリと時間がかかる）
 #   開発 PC でイメージを作って運ぶ:
 #     podman build -f deploy/Containerfile -t fusen-server:latest .
@@ -44,10 +48,15 @@ services:
       # Caddyfile の request_body max_size と合わせる
       FUSEN_MAX_UPLOAD_BYTES: ${FUSEN_MAX_UPLOAD_BYTES:-524288000}
       RUST_LOG: ${RUST_LOG:-info}
+      # 管理画面（.env で設定したときだけ起動する。D-016）
+      FUSEN_ADMIN_LISTEN: ${FUSEN_ADMIN_LISTEN:-}
+      FUSEN_ADMIN_PASSWORD: ${FUSEN_ADMIN_PASSWORD:-}
     volumes:
       - ${FUSEN_DATA_PATH:-./data}:/data
     ports:
       - "${FUSEN_BIND:-127.0.0.1}:${FUSEN_PORT:-8080}:8080"
+      # 管理画面はホストの 127.0.0.1 にだけ公開する（FUSEN_BIND に関係なく。外からは SSH のポート転送で使う）
+      - "127.0.0.1:${FUSEN_ADMIN_PORT:-9010}:9010"
     healthcheck:
       test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
       interval: 30s
